@@ -28,6 +28,7 @@ from wdm.analysis.family import (
     apply_group_correlation,
     build_families_summary,
     build_semantic_groups_summary,
+    discover_derivation_candidates,
     parse_families,
     parse_semantic_groups,
     rank_within_family,
@@ -96,14 +97,34 @@ def _apply_hard_filters(df, cfg):
     return df
 
 
-def _rank_and_auto_keep(df):
+def _window_penalty_series(df, cfg):
+    """Map each row's canonical `window` through family_policy.window_penalty_table.
+
+    Unknown / None windows get 0. If the table is missing, falls back to a
+    linear schedule over window_order (i/len(order) * 0.3). Returns a float
+    pandas Series aligned to df's index.
+    """
+    policy = (cfg.get("feature_groups") or {}).get("family_policy") or {}
+    table = policy.get("window_penalty_table") or {}
+    table = {str(k): float(v) for k, v in table.items()}
+    if not table:
+        order = list((cfg.get("feature_groups") or {}).get("window_order") or [])
+        n = max(len(order), 1)
+        table = {w: (i / n) * 0.3 for i, w in enumerate(order)}
+    return df["window"].map(lambda w: table.get(w, 0.0) if isinstance(w, str) else 0.0).astype(float)
+
+
+def _rank_and_auto_keep(df, cfg):
     df = df.copy()
+    policy = (cfg.get("feature_groups") or {}).get("family_policy") or {}
+    gamma = float(policy.get("window_penalty_gamma", 0.0))
     df["rank_score"] = (
         _zscore(df["iv"])
         + _zscore(df["lift_at_k"])
         + _zscore(df["gini"])
         - 1.0 * _zscore(df["psi"])
         - 0.5 * (df["missing_rate"] > 0.5).astype(float)
+        - gamma * _window_penalty_series(df, cfg)
     )
 
     # Within each correlation cluster, only the top-score survivor passes.
@@ -147,7 +168,7 @@ def _apply_column_ordering(df, mapping):
     df = inject_cn_column(df, mapping, feature_col="feature", cn_col="feature_cn")
     preferred = [
         "feature", "feature_cn",
-        "family_base", "window", "semantic_group",
+        "family_base", "window", "pattern_id", "semantic_group",
         "dtype", "n_total", "n_unique", "missing_rate",
         "iv", "monotonic", "missing_n", "missing_woe",
         "psi", "flag",
@@ -170,7 +191,8 @@ def _write_index_html(report_dir_path, mapping):
     """
     report_dir_path = Path(report_dir_path)
     csvs = sorted([p.name for p in report_dir_path.glob("*.csv")])
-    summary_first = ["summary.csv", "families.csv", "semantic_groups.csv",
+    summary_first = ["summary.csv", "families.csv",
+                     "family_derivation_candidates.csv", "semantic_groups.csv",
                      "iv_woe.csv", "psi.csv", "lift.csv", "missing.csv",
                      "correlation_edges.csv"]
     ordered = [n for n in summary_first if n in csvs]
@@ -357,7 +379,7 @@ def run_stage1(cfg):
 
     # Hard filters → rank_score → auto_keep → drop_reason
     base = _apply_hard_filters(base, cfg)
-    base = _rank_and_auto_keep(base)
+    base = _rank_and_auto_keep(base, cfg)
 
     # Column ordering + 中文列名
     mapping = load_column_mapping(cfg)
@@ -391,11 +413,16 @@ def run_stage1(cfg):
         edges_out = edges_out[["f1", "f1_cn", "f2", "f2_cn", "r", "n_pairs", "low_overlap"]]
     edges_out.to_csv(rdir / "correlation_edges.csv", index=False)
 
-    fam_summary = build_families_summary(summary)
+    fam_summary = build_families_summary(summary, cfg)
     fam_summary.to_csv(rdir / "families.csv", index=False)
 
     sem_summary = build_semantic_groups_summary(summary, missing_by_group, cfg)
     sem_summary.to_csv(rdir / "semantic_groups.csv", index=False)
+
+    cand_df = discover_derivation_candidates(summary, cfg)
+    cand_df.to_csv(rdir / "family_derivation_candidates.csv", index=False)
+    logger.info("Derivation candidates: %d multi-window families flagged → %s",
+                len(cand_df), rdir / "family_derivation_candidates.csv")
 
     # Optional XLSX — only if openpyxl happens to be available
     try:
@@ -410,6 +437,7 @@ def run_stage1(cfg):
             edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
             fam_summary.to_excel(w, sheet_name="Families", index=False)
             sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
+            cand_df.to_excel(w, sheet_name="DerivationCandidates", index=False)
         logger.info("Wrote optional XLSX: %s", xlsx_path)
     except Exception as e:
         logger.info("Skipped XLSX generation: %s", e)

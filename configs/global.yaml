@@ -1,15 +1,51 @@
 # wdmarketing global defaults. Products under configs/products/*.yaml override selected keys.
 feature_groups:
-  # (A) Time-window families: auto-detected by regex on feature names
+  # (A) Time-window families: auto-detected by regex on feature names.
+  #     Two schemas are accepted; products can override via deep merge.
+  #     (a) legacy single-regex form (kept for back-compat):
   window_pattern: '^(?P<base>.+?)_(?P<window>7d|30d|90d|180d|360d|all|life|hist)$'
+  #     (b) multi-pattern form (preferred — supports mixed naming conventions,
+  #         e.g. xxx_7d / xxx_d7 / xxx_近7天 / xxx_last7days / xxx_1mon / xxx_1y):
+  #       window_patterns:
+  #         - preset: suffix_day          # references src/wdm/analysis/family.py:_WINDOW_PATTERN_PRESETS
+  #         - preset: chinese_jin_days
+  #         - pattern: '^(?P<base>.+?)_W(?P<window>\d+)$'   # inline custom
+  #           alias_rule: "{window}d"
+  #     Available presets: suffix_day, prefix_d, chinese_jin_days,
+  #       english_last_days, number_only, suffix_mon, chinese_jin_months,
+  #       english_last_months, suffix_mon_to_days, suffix_year,
+  #       chinese_jin_years, english_last_years, suffix_year_to_days.
   window_order: [7d, 30d, 90d, 180d, 360d, all, life, hist]
   family_policy:
     max_per_family: 2
-    prefer: best_iv              # best_iv | shortest | longest
+    # best_iv | shortest | longest | best_iv_short_bias
+    # best_iv_short_bias: within coverage_bias_iv_tolerance of the family's best IV,
+    # prefer shorter windows; outside tolerance, fall back to pure IV ordering.
+    prefer: best_iv
     corr_cutoff_in_family: 0.90
+    coverage_bias_iv_tolerance: 0.02   # tolerance (absolute IV) for best_iv_short_bias
+    window_penalty_gamma: 0.0          # 0 disables window_penalty in rank_score; try 0.1~0.2
+    window_penalty_table:              # canonical-window -> penalty; missing → linear fallback
+      7d: 0.0
+      30d: 0.0
+      90d: 0.1
+      180d: 0.2
+      360d: 0.3
+      all: 0.4
+      life: 0.4
+      hist: 0.4
   # (B) Semantic groups: manually declared in product YAML. Empty here.
   semantic_groups: []
   # (C) Plain numerical correlation is handled by analysis/correlation.py union-find.
+
+# Disabled placeholder — a future PR will implement Stage-2 materialization
+# of derived features (delta / ratio / incremental / velocity) and predict.py
+# replay. Stage-1 already reads this only to mark families as `already_configured`
+# in family_derivation_candidates.csv; nothing else reads it yet.
+feature_derivations:
+  enabled: false
+  default_keep_original: both         # both | replace | drop_original
+  families: []                        # see src/wdm/analysis/family.py docstring for schema
 
 missing:
   global:

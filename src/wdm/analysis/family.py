@@ -6,51 +6,196 @@ Three kinds of correlation to handle differently:
   (C) Plain numerical:              falls back to correlation.py union-find.
 
 This module enriches the feature report with:
-  * family_base, window, window_rank, family_size, in_family_rank, family_kept
+  * family_base, window, window_rank, pattern_id, family_size,
+    in_family_rank, family_kept
   * semantic_group, group_size, in_group_rank, group_kept
 
 And provides `apply_group_correlation` which tightens the corr cutoff inside
 a family (0.90) or semantic group (0.85) while keeping the global cutoff (0.95).
+
+Pattern configuration (feature_groups):
+  Two schemas are accepted (pick one):
+    (1) window_pattern: "<single regex with (?P<base>...) (?P<window>...)>"
+    (2) window_patterns:
+          - preset: suffix_day          # reference a named preset, or
+          - pattern: "<regex>"          # define inline
+            alias:        {raw: canonical}  # optional explicit map
+            alias_rule:   "{window}d"       # optional template alternative
+
+  Multi-pattern mode tries each pattern in order; the first one to match
+  a feature name wins. Matched `window` tokens are canonicalized via
+  `alias` > `alias_rule` > raw, so downstream code only sees canonical
+  keys from `window_order` (e.g. "7d", "30d", "1mon", "1y").
+
+Schema placeholder for a future PR (NOT read here):
+  feature_derivations:
+    enabled: false
+    default_keep_original: both   # both | replace | drop_original
+    families:
+      - family_base: <name>
+        ops:
+          - op: delta | ratio | incremental | velocity
+            ...
+        keep_original: both | replace | drop_original
 """
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Named presets for the window_patterns config. Each entry has:
+#   pattern:    a regex with named groups (?P<base>...) and (?P<window>...)
+#   alias:      optional dict mapping raw window token -> canonical key
+#   alias_rule: optional str template; formatted as rule.format(window=raw_token)
+# When neither alias nor alias_rule is provided, the raw match is kept verbatim.
+_WINDOW_PATTERN_PRESETS: Dict[str, Dict[str, Any]] = {
+    # 天粒度
+    "suffix_day":         {"pattern": r'^(?P<base>.+?)_(?P<window>7d|30d|90d|180d|360d|all|life|hist)$'},
+    "prefix_d":           {"pattern": r'^(?P<base>.+?)_d(?P<window>7|30|90|180|360)$',
+                           "alias_rule": "{window}d"},
+    "chinese_jin_days":   {"pattern": r'^(?P<base>.+?)_近(?P<window>\d+)天$',
+                           "alias_rule": "{window}d"},
+    "english_last_days":  {"pattern": r'^(?P<base>.+?)_last(?P<window>\d+)days$',
+                           "alias_rule": "{window}d"},
+    "number_only":        {"pattern": r'^(?P<base>.+?)_(?P<window>7|14|30|60|90|180|360)$',
+                           "alias_rule": "{window}d"},
+    # 月粒度（保留 mon 作为 canonical key，不折算天）
+    "suffix_mon":         {"pattern": r'^(?P<base>.+?)_(?P<window>1mon|3mon|6mon|12mon|24mon|all|life|hist)$'},
+    "chinese_jin_months": {"pattern": r'^(?P<base>.+?)_近(?P<window>\d+)月$',
+                           "alias_rule": "{window}mon"},
+    "english_last_months":{"pattern": r'^(?P<base>.+?)_last(?P<window>\d+)months$',
+                           "alias_rule": "{window}mon"},
+    # 月粒度 → 折算到天 canonical key（若与天粒度混用推荐）
+    "suffix_mon_to_days": {"pattern": r'^(?P<base>.+?)_(?P<window>\d+)mon$',
+                           "alias": {"1": "30d", "3": "90d", "6": "180d",
+                                     "12": "360d", "24": "720d"}},
+    # 年粒度（保留 y 作为 canonical key）
+    "suffix_year":        {"pattern": r'^(?P<base>.+?)_(?P<window>1y|2y|3y|5y|10y|all|life|hist)$'},
+    "chinese_jin_years":  {"pattern": r'^(?P<base>.+?)_近(?P<window>\d+)年$',
+                           "alias_rule": "{window}y"},
+    "english_last_years": {"pattern": r'^(?P<base>.+?)_last(?P<window>\d+)years$',
+                           "alias_rule": "{window}y"},
+    # 年粒度 → 折算到天 canonical key
+    "suffix_year_to_days":{"pattern": r'^(?P<base>.+?)_(?P<window>\d+)y$',
+                           "alias": {"1": "360d", "2": "720d", "3": "1080d",
+                                     "5": "1800d", "10": "3600d"}},
+}
+
+
+def _resolve_patterns(cfg: Dict[str, Any]) -> List[Tuple[Any, Dict[str, str], Optional[str], str]]:
+    """Return compiled patterns as [(regex, alias_map, alias_rule, pattern_id), ...]
+
+    Accepts either `feature_groups.window_patterns` (list form) or the older
+    singular `feature_groups.window_pattern` (string form). An empty list is
+    returned if neither is configured.
+    """
+    fg = cfg.get("feature_groups") or {}
+    raw = fg.get("window_patterns")
+    if not raw:
+        single = fg.get("window_pattern")
+        if not single:
+            return []
+        raw = [{"pattern": single, "id": "legacy_window_pattern"}]
+
+    resolved = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError("window_patterns[{0}] must be a dict; got {1!r}".format(i, item))
+        if "preset" in item:
+            preset_name = item["preset"]
+            if preset_name not in _WINDOW_PATTERN_PRESETS:
+                raise ValueError("Unknown window pattern preset: {0!r}. "
+                                 "Available: {1}".format(preset_name,
+                                                         sorted(_WINDOW_PATTERN_PRESETS)))
+            merged = dict(_WINDOW_PATTERN_PRESETS[preset_name])
+            for k, v in item.items():
+                if k != "preset":
+                    merged[k] = v
+            item = merged
+        pat = item.get("pattern")
+        if not pat:
+            raise ValueError("window_patterns[{0}] must provide 'preset' or 'pattern'".format(i))
+        regex = re.compile(pat)
+        if "base" not in regex.groupindex or "window" not in regex.groupindex:
+            raise ValueError("window_patterns[{0}] pattern must contain named "
+                             "groups (?P<base>...) and (?P<window>...); got {1!r}"
+                             .format(i, pat))
+        alias = item.get("alias") or {}
+        # Coerce alias keys/values to str for safety (YAML may parse "7" as int)
+        alias = {str(k): str(v) for k, v in alias.items()}
+        alias_rule = item.get("alias_rule")
+        pid = item.get("id") or item.get("preset") or "pattern_{0}".format(i)
+        resolved.append((regex, alias, alias_rule, pid))
+    return resolved
+
+
+def _canonicalize_window(raw_window: str,
+                         alias_map: Dict[str, str],
+                         alias_rule: Optional[str]) -> str:
+    """Normalize a matched raw window token to its canonical key.
+
+    Priority: explicit alias dict > alias_rule template > raw value.
+    """
+    if raw_window in alias_map:
+        return alias_map[raw_window]
+    if alias_rule:
+        return alias_rule.format(window=raw_window)
+    return raw_window
+
 
 def parse_families(features, cfg):
     """Parse feature list for time-window membership.
 
-    Returns DataFrame[feature, family_base, window, window_rank].
+    Returns DataFrame[feature, family_base, window, window_rank, pattern_id].
+
+    Supports both single-regex (`feature_groups.window_pattern`) and
+    multi-pattern (`feature_groups.window_patterns`) config; see module
+    docstring for schema details.
     """
-    pattern = cfg["feature_groups"]["window_pattern"]
-    order = cfg["feature_groups"]["window_order"]
+    patterns = _resolve_patterns(cfg)
+    order = list(cfg["feature_groups"].get("window_order") or [])
     rank_map = {w: i for i, w in enumerate(order)}
-    regex = re.compile(pattern)
 
     rows = []
+    unknown_windows = set()
     for f in features:
-        m = regex.match(f)
-        if m:
+        matched = False
+        for regex, alias_map, alias_rule, pid in patterns:
+            m = regex.match(f)
+            if not m:
+                continue
             base = m.group("base")
-            w = m.group("window")
+            raw_w = m.group("window")
+            w = _canonicalize_window(raw_w, alias_map, alias_rule)
+            if rank_map and w not in rank_map:
+                unknown_windows.add(w)
             rows.append({
                 "feature": f,
                 "family_base": base,
                 "window": w,
                 "window_rank": int(rank_map.get(w, len(order))),
+                "pattern_id": pid,
             })
-        else:
+            matched = True
+            break
+        if not matched:
             rows.append({
                 "feature": f,
                 "family_base": f,
                 "window": None,
                 "window_rank": None,
+                "pattern_id": None,
             })
+
+    if unknown_windows:
+        logger.warning("Unknown canonical windows (not in window_order): %s "
+                       "— they will rank last. Update window_order or the "
+                       "alias_rule/alias for the relevant pattern.",
+                       sorted(unknown_windows))
     return pd.DataFrame(rows)
 
 
@@ -114,6 +259,7 @@ def rank_within_family(feature_report, cfg):
     policy = cfg["feature_groups"]["family_policy"]
     prefer = policy.get("prefer", "best_iv")
     max_per = int(policy.get("max_per_family", 2))
+    tol = float(policy.get("coverage_bias_iv_tolerance", 0.02))
 
     df = feature_report.copy()
     df["family_size"] = df.groupby("family_base")["feature"].transform("size").astype(int)
@@ -129,6 +275,18 @@ def rank_within_family(feature_report, cfg):
             return block.sort_values(["window_rank", "iv"],
                                      ascending=[False, False],
                                      na_position="last").reset_index()
+        if prefer == "best_iv_short_bias":
+            # Within IV tolerance of the family's best, prefer the shortest window;
+            # outside tolerance, fall back to pure IV ordering. This counteracts
+            # the coverage advantage long windows have on families whose short
+            # siblings carry comparable predictive signal.
+            iv_best = float(block["iv"].max())
+            mask = block["iv"] >= (iv_best - tol)
+            head = block[mask].sort_values(["window_rank", "iv"],
+                                           ascending=[True, False],
+                                           na_position="last").reset_index()
+            tail = block[~mask].sort_values("iv", ascending=False).reset_index()
+            return pd.concat([head, tail], ignore_index=True)
         raise ValueError("Unknown family prefer: {0}".format(prefer))
 
     df["in_family_rank"] = 0
@@ -213,15 +371,101 @@ def apply_group_correlation(edges_df, family_df, semantic_df, cfg):
     return out
 
 
-def build_families_summary(feature_report):
-    """Aggregate view grouped by family_base, for the Families sheet/CSV."""
+def _family_iv_stats(block: pd.DataFrame) -> Dict[str, Any]:
+    """Compute shortest/longest window IV stats for a family block.
+
+    Returns dict with keys: iv_best, iv_best_window, iv_shortest, iv_shortest_window,
+    iv_longest, iv_longest_window, iv_ratio_long_over_short, iv_delta_best_vs_short,
+    missing_rate_shortest. NaN-safe.
+    """
+    if "iv" not in block.columns or block.empty:
+        return {}
+    ranked = block.dropna(subset=["window_rank"]).copy()
+    iv_best_idx = block["iv"].idxmax() if block["iv"].notna().any() else None
+    out: Dict[str, Any] = {
+        "iv_best": float(block["iv"].max()) if iv_best_idx is not None else np.nan,
+        "iv_best_window": block.loc[iv_best_idx, "window"] if iv_best_idx is not None else None,
+    }
+    if ranked.empty:
+        out.update({
+            "iv_shortest": np.nan, "iv_shortest_window": None,
+            "iv_longest": np.nan, "iv_longest_window": None,
+            "iv_ratio_long_over_short": np.nan,
+            "iv_delta_best_vs_short": np.nan,
+            "missing_rate_shortest": np.nan,
+        })
+        return out
+    short_row = ranked.loc[ranked["window_rank"].idxmin()]
+    long_row = ranked.loc[ranked["window_rank"].idxmax()]
+    iv_short = float(short_row["iv"]) if pd.notna(short_row["iv"]) else np.nan
+    iv_long = float(long_row["iv"]) if pd.notna(long_row["iv"]) else np.nan
+    ratio = (iv_long / iv_short) if (iv_short and iv_short > 0) else np.nan
+    delta = (out["iv_best"] - iv_short) if pd.notna(iv_short) else np.nan
+    out.update({
+        "iv_shortest": iv_short,
+        "iv_shortest_window": short_row["window"],
+        "iv_longest": iv_long,
+        "iv_longest_window": long_row["window"],
+        "iv_ratio_long_over_short": ratio,
+        "iv_delta_best_vs_short": delta,
+        "missing_rate_shortest": (float(short_row["missing_rate"])
+                                  if "missing_rate" in short_row.index
+                                  and pd.notna(short_row["missing_rate"]) else np.nan),
+    })
+    return out
+
+
+def _suggest_derivation_ops(stats: Dict[str, Any], n_windows: int) -> Tuple[List[str], str]:
+    """Return (ops_list, rationale) per the heuristics documented in the plan."""
+    ops: List[str] = []
+    reasons: List[str] = []
+    iv_short = stats.get("iv_shortest")
+    iv_best = stats.get("iv_best")
+    ratio = stats.get("iv_ratio_long_over_short")
+    miss_short = stats.get("missing_rate_shortest")
+
+    if n_windows >= 2 and pd.notna(ratio) and ratio > 1.5:
+        ops.extend(["delta", "ratio"])
+        reasons.append("long_{0:.2f}x_iv_of_short".format(ratio))
+    if n_windows >= 3:
+        ops.append("incremental")
+        reasons.append("has_3plus_windows")
+    if (pd.notna(iv_short) and pd.notna(iv_best) and iv_best > 0
+            and iv_short >= 0.8 * iv_best
+            and (pd.isna(miss_short) or miss_short < 0.9)):
+        ops.append("keep_short_only")
+        reasons.append("short_iv_within_20pct_of_best")
+    # Dedup while preserving order
+    seen = set()
+    ops_unique = [o for o in ops if not (o in seen or seen.add(o))]
+    return ops_unique, ";".join(reasons)
+
+
+def _configured_derivation_bases(cfg: Dict[str, Any]) -> set:
+    fd = (cfg.get("feature_derivations") or {})
+    if not fd.get("enabled"):
+        return set()
+    families = fd.get("families") or []
+    return {str(g.get("family_base")) for g in families if g.get("family_base")}
+
+
+def build_families_summary(feature_report, cfg=None):
+    """Aggregate view grouped by family_base, for the Families sheet/CSV.
+
+    When `cfg` is provided, also includes three derivation-hint columns:
+    `iv_ratio_long_over_short`, `iv_delta_best_vs_short`, `derivation_suggested`.
+    """
     df = feature_report.copy()
     rows = []
     for base, block in df.groupby("family_base"):
         if len(block) <= 1:
             continue  # skip singletons
         windows = [w for w in block["window"].tolist() if w is not None]
-        rows.append({
+        stats = _family_iv_stats(block) if cfg is not None else {}
+        n_windows = int(block["window"].notna().sum()) if "window" in block.columns else 0
+        suggested_ops, _ = (_suggest_derivation_ops(stats, n_windows)
+                            if cfg is not None else ([], ""))
+        row = {
             "family_base": base,
             "window_list": ",".join(windows),
             "iv_best": float(block["iv"].max()) if "iv" in block else np.nan,
@@ -230,13 +474,75 @@ def build_families_summary(feature_report):
             "kept_count": int(block.get("family_kept", pd.Series([True] * len(block))).sum()),
             "kept_features": ",".join(
                 block.loc[block.get("family_kept", True) == True, "feature"].tolist()),
-        })
-    out = pd.DataFrame(rows, columns=["family_base", "window_list", "iv_best",
-                                      "iv_median", "psi_max", "kept_count",
-                                      "kept_features"])
+        }
+        if cfg is not None:
+            row.update({
+                "iv_ratio_long_over_short": stats.get("iv_ratio_long_over_short", np.nan),
+                "iv_delta_best_vs_short": stats.get("iv_delta_best_vs_short", np.nan),
+                "derivation_suggested": bool(suggested_ops),
+            })
+        rows.append(row)
+    columns = ["family_base", "window_list", "iv_best", "iv_median", "psi_max",
+               "kept_count", "kept_features"]
+    if cfg is not None:
+        columns += ["iv_ratio_long_over_short", "iv_delta_best_vs_short",
+                    "derivation_suggested"]
+    out = pd.DataFrame(rows, columns=columns)
     if out.empty:
         return out
     return out.sort_values("iv_best", ascending=False).reset_index(drop=True)
+
+
+def discover_derivation_candidates(feature_report, cfg):
+    """Emit a per-family advice table naming which families have 2+ windows
+    and which derivation ops (delta/ratio/incremental/keep_short_only) they
+    look like candidates for. Returns a DataFrame with a stable column schema
+    (empty rows when no multi-window families exist).
+
+    This function does NOT execute any derivation — it only suggests.
+    """
+    columns = [
+        "family_base", "n_windows", "window_list",
+        "iv_best_window", "iv_best_value",
+        "iv_shortest_window", "iv_shortest_value",
+        "iv_ratio_long_over_short", "iv_delta_best_vs_short",
+        "missing_rate_shortest", "suggested_ops", "rationale", "already_configured",
+    ]
+    if feature_report is None or feature_report.empty:
+        return pd.DataFrame(columns=columns)
+
+    configured = _configured_derivation_bases(cfg)
+    rows = []
+    for base, block in feature_report.groupby("family_base"):
+        # Count only rows that matched a pattern (window non-null)
+        windowed = block["window"].notna() if "window" in block.columns else pd.Series([False] * len(block))
+        n_windows = int(windowed.sum())
+        if n_windows < 2:
+            continue
+        stats = _family_iv_stats(block)
+        ops, rationale = _suggest_derivation_ops(stats, n_windows)
+        windows = [w for w in block.loc[windowed, "window"].tolist()]
+        rows.append({
+            "family_base": base,
+            "n_windows": n_windows,
+            "window_list": ",".join(windows),
+            "iv_best_window": stats.get("iv_best_window"),
+            "iv_best_value": stats.get("iv_best"),
+            "iv_shortest_window": stats.get("iv_shortest_window"),
+            "iv_shortest_value": stats.get("iv_shortest"),
+            "iv_ratio_long_over_short": stats.get("iv_ratio_long_over_short"),
+            "iv_delta_best_vs_short": stats.get("iv_delta_best_vs_short"),
+            "missing_rate_shortest": stats.get("missing_rate_shortest"),
+            "suggested_ops": ",".join(ops),
+            "rationale": rationale,
+            "already_configured": str(base) in configured,
+        })
+    out = pd.DataFrame(rows, columns=columns)
+    if out.empty:
+        return out
+    # Sort so highest-IV candidates surface first
+    return out.sort_values(["iv_best_value", "n_windows"],
+                           ascending=[False, False]).reset_index(drop=True)
 
 
 def build_semantic_groups_summary(feature_report, missing_by_group, cfg):

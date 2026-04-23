@@ -12,6 +12,7 @@ The returned dict has overrides already applied; callers treat it as flat config
 import copy
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -95,6 +96,26 @@ def _validate(cfg: Dict[str, Any]) -> None:
     valid = {"constant", "median", "mean", "zero", "special", "keep_nan"}
     if fill_strategy not in valid:
         raise ValueError("missing.global.fill_strategy must be one of {0}".format(valid))
+
+    _validate_feature_groups(cfg)
+
+
+def _validate_feature_groups(cfg: Dict[str, Any]) -> None:
+    """Validate feature_groups.window_patterns / window_pattern up-front so
+    regex / preset mistakes fail at config load, not mid-Stage-1.
+    """
+    fg = cfg.get("feature_groups") or {}
+    patterns = fg.get("window_patterns")
+    single = fg.get("window_pattern")
+    if not patterns and not single:
+        raise ValueError("feature_groups must define either 'window_patterns' "
+                         "(list) or 'window_pattern' (single regex)")
+
+    from wdm.analysis.family import _resolve_patterns  # lazy to avoid cycles
+    try:
+        _resolve_patterns(cfg)
+    except (re.error, ValueError) as exc:
+        raise ValueError("feature_groups pattern config invalid: {0}".format(exc))
 
 
 def load_config(product_name: str,
