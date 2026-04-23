@@ -1,4 +1,5 @@
 """Missing-value rule and sanity-check tests."""
+import json
 import math
 
 import numpy as np
@@ -6,8 +7,9 @@ import pandas as pd
 import pytest
 
 from wdm.preprocess.missing import (
-    MissingSpec, apply_missing_for_training, build_missing_spec,
-    fit_missing, sanity_check_fill_value, to_nan_array,
+    MISSING_SPEC_SCHEMA_VERSION, MissingSpec, apply_missing_for_training,
+    build_missing_spec, dump_missing_spec, fit_missing, load_missing_spec,
+    sanity_check_fill_value, to_nan_array,
 )
 
 
@@ -75,3 +77,43 @@ def test_keep_nan_strategy_leaves_nan():
     out = apply_missing_for_training(df, {"x": spec, "__default__": spec}, fitted)
     nan_mask = out["x"].isna().values
     assert list(nan_mask) == [True, False, True, False]
+
+
+def test_dump_missing_spec_stamps_schema_version(tmp_path):
+    spec = MissingSpec(fill_strategy="constant", fill_constant=-999.0,
+                       sentinels=[], treat_negative_as_missing=True)
+    df = pd.DataFrame({"age": np.array([20.0, 30.0, 50.0, 70.0])})
+    fitted = fit_missing(df, {"age": spec, "__default__": spec})
+    path = tmp_path / "missing_spec.json"
+    dump_missing_spec(str(path), {"age": spec, "__default__": spec}, fitted)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == MISSING_SPEC_SCHEMA_VERSION
+
+    loaded_specs, loaded_fitted = load_missing_spec(str(path))
+    assert "age" in loaded_specs
+    assert loaded_fitted["age"]["fill_value"] == -999.0
+
+
+def test_load_missing_spec_rejects_future_schema(tmp_path):
+    path = tmp_path / "missing_spec.json"
+    path.write_text(json.dumps({
+        "schema_version": MISSING_SPEC_SCHEMA_VERSION + 99,
+        "specs": {"__default__": {"fill_strategy": "constant", "fill_constant": -999.0}},
+        "fitted": {},
+    }), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_missing_spec(str(path))
+
+
+def test_load_missing_spec_accepts_legacy_unversioned(tmp_path):
+    # Bundles written before schema_version existed default to 0 and should
+    # still load — we only refuse versions strictly newer than we support.
+    path = tmp_path / "missing_spec.json"
+    path.write_text(json.dumps({
+        "specs": {"__default__": {"fill_strategy": "constant", "fill_constant": -999.0}},
+        "fitted": {},
+    }), encoding="utf-8")
+    spec_map, fitted = load_missing_spec(str(path))
+    assert "__default__" in spec_map
+    assert fitted == {}

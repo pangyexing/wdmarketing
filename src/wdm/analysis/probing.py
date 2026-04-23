@@ -259,6 +259,12 @@ def run_probing(cfg, cache_dir, out_dir):
     imp_path = out_dir / "probing_importance.csv"
     imp_df.to_csv(imp_path, index=False)
 
+    # Snapshot the cache's staleness fingerprint into probing_meta so Stage 2
+    # can detect "cache was rebuilt between probing and training" drift.
+    cache_fp = {k: cache["meta"].get(k) for k in (
+        "csv_path", "csv_size_bytes", "csv_mtime",
+        "n_rows", "n_features", "nnz", "density")}
+
     meta = {
         "n_rows_total": int(X.shape[0]),
         "n_train_rows": n_tr,
@@ -277,6 +283,7 @@ def run_probing(cfg, cache_dir, out_dir):
         "best_valid_aucpr": best_score,
         "coverage_basis": "train_plus_valid_rows",
         "cache_dir": str(cache_dir),
+        "cache_fingerprint": cache_fp,
     }
     (out_dir / "probing_meta.json").write_text(
         json.dumps(meta, indent=2, default=str), encoding="utf-8")

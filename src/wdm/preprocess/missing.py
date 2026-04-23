@@ -247,9 +247,15 @@ def apply_missing_for_training(df, spec_map, fitted):
 
 # ---------- persistence (for exporter + predict.py) ----------
 
+# Bump when MissingSpec / FittedStats gain a field that predict.py must understand.
+# Older predict.py bundles read this key and refuse to run on a newer, unknown version.
+MISSING_SPEC_SCHEMA_VERSION = 1
+
+
 def dump_missing_spec(path, spec_map, fitted):
     """Write a self-contained JSON bundle usable by predict.py at deploy time."""
     payload = {
+        "schema_version": MISSING_SPEC_SCHEMA_VERSION,
         "specs": {feat: s.to_dict() for feat, s in spec_map.items()},
         "fitted": {feat: fs.to_dict() for feat, fs in fitted.items()},
     }
@@ -260,6 +266,12 @@ def dump_missing_spec(path, spec_map, fitted):
 def load_missing_spec(path):
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
+    version = int(payload.get("schema_version", 0))
+    if version > MISSING_SPEC_SCHEMA_VERSION:
+        raise ValueError(
+            "missing_spec.json schema_version={0} is newer than this code "
+            "understands ({1}). Upgrade the wdm package.".format(
+                version, MISSING_SPEC_SCHEMA_VERSION))
     spec_map = {k: MissingSpec.from_dict(v) for k, v in payload["specs"].items()}
     # fitted stays as dicts — predict.py only reads scalars from it
     return spec_map, payload["fitted"]

@@ -22,6 +22,11 @@ import pandas as pd
 import xgboost as xgb
 
 
+# Highest missing_spec.json schema version this predict.py can read. Keep in
+# sync with MISSING_SPEC_SCHEMA_VERSION in wdm/preprocess/missing.py.
+_SUPPORTED_SPEC_SCHEMA = 1
+
+
 def _apply_missing_rules(df, spec_map, fitted):
     """Replay the training-time missing rules on a raw DataFrame.
 
@@ -79,11 +84,31 @@ class Predictor(object):
             self.feature_list = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
         with open(self.bundle / "missing_spec.json", "r", encoding="utf-8") as f:
             payload = json.load(f)
+        spec_version = int(payload.get("schema_version", 0))
+        if spec_version > _SUPPORTED_SPEC_SCHEMA:
+            raise ValueError(
+                "missing_spec.json schema_version={0} is newer than this "
+                "predict.py supports (max {1}). Re-export the bundle with a "
+                "predict.py from the same training run.".format(
+                    spec_version, _SUPPORTED_SPEC_SCHEMA))
         self.spec_map = payload["specs"]
         self.fitted = payload["fitted"]
         # Precompute indicator features (names ending with __isnan)
         self.indicator_features = [f for f in self.feature_list if f.endswith("__isnan")]
         self.base_features = [f for f in self.feature_list if not f.endswith("__isnan")]
+
+        # Verify feature_list.txt is consistent with the booster. A silent
+        # mismatch would produce plausible-looking but wrong scores because
+        # XGBoost's positional DMatrix has no way to flag reordered columns.
+        try:
+            booster_n = int(self.booster.num_features())
+        except Exception:
+            booster_n = None
+        if booster_n is not None and booster_n != len(self.feature_list):
+            raise ValueError(
+                "feature_list.txt has {0} entries but booster.json expects {1} "
+                "features — bundle is inconsistent. Re-export from training.".format(
+                    len(self.feature_list), booster_n))
 
     def _apply(self, df_raw):
         needed = set(self.base_features)
@@ -96,6 +121,32 @@ class Predictor(object):
             sys.stderr.write("[predict] ignored extra columns: {0}\n".format(sorted(extras)))
         base_df = df_raw[self.base_features]
         applied = _apply_missing_rules(base_df, self.spec_map, self.fitted)
+
+        # All-NA rows (every base feature missing under the training rules)
+        # produce a DMatrix row of fill values / NaN. The booster's default
+        # direction still returns a score, but it's uninformative — warn so
+        # operators can triage upstream data-delivery issues instead of
+        # trusting the number silently.
+        all_na = np.ones(len(df_raw), dtype=bool)
+        for feat in self.base_features:
+            spec = self.spec_map.get(feat) or self.spec_map.get("__default__") or {}
+            mask_df = _apply_missing_rules(
+                pd.DataFrame({feat: df_raw[feat]}),
+                {feat: {**spec, "fill_strategy": "keep_nan"},
+                 "__default__": self.spec_map.get("__default__", {})},
+                {feat: {"fill_strategy": "keep_nan", "fill_value": float("nan")}})
+            all_na &= np.isnan(mask_df[feat].values)
+            if not all_na.any():
+                break
+        n_all_na = int(all_na.sum())
+        if n_all_na:
+            rate = 100.0 * n_all_na / max(1, len(df_raw))
+            sys.stderr.write(
+                "[predict] WARNING: {0}/{1} rows ({2:.2f}%) have every base "
+                "feature missing — scores for these rows reflect the booster's "
+                "default-direction prior, not real signal.\n".format(
+                    n_all_na, len(df_raw), rate))
+
         # Recompute __isnan indicators from raw values (not from post-fill)
         frames = [applied]
         for ind in self.indicator_features:
