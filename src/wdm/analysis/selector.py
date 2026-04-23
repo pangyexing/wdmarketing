@@ -88,13 +88,15 @@ def _build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic
 
     if probing_df is not None and len(probing_df):
         keep = [c for c in ("feature", "gain", "weight", "cover",
-                            "gain_rank_pct", "weight_rank_pct", "cover_rank_pct")
+                            "gain_rank_pct", "weight_rank_pct", "cover_rank_pct",
+                            "coverage")
                 if c in probing_df.columns]
         pr = probing_df[keep].rename(columns={
             "gain": "probe_gain", "weight": "probe_weight", "cover": "probe_cover"})
         df = df.merge(pr, on="feature", how="left")
         for c in ("probe_gain", "probe_weight", "probe_cover",
-                  "gain_rank_pct", "weight_rank_pct", "cover_rank_pct"):
+                  "gain_rank_pct", "weight_rank_pct", "cover_rank_pct",
+                  "coverage"):
             if c in df.columns:
                 fillna_map[c] = 0.0
 
@@ -217,9 +219,31 @@ def _rank_and_auto_keep(df, cfg):
         # gain_rank_pct is already in [0,1]; z-score makes it commensurate with
         # the other z-scored terms.
         df["rank_score"] = df["rank_score"] + w_probe * _zscore(df["gain_rank_pct"])
+
+        # Coverage-stratified gain rank: features compete for "high gain" only
+        # against peers of similar support. Raw gain/split-count is biased
+        # toward dense features (more non-missing rows → more splits), so a
+        # sparse feature with real conditional signal can be unfairly parked
+        # in "noise" by the global ranking. Binning by coverage quintile and
+        # ranking gain within each bin neutralizes that bias.
+        if "coverage" in df.columns:
+            try:
+                cov_bin = pd.qcut(df["coverage"], q=5, labels=False,
+                                   duplicates="drop")
+            except ValueError:
+                # Degenerate coverage (all equal) — fall back to a single bin.
+                cov_bin = pd.Series(0, index=df.index)
+            df["gain_rank_pct_by_coverage"] = (
+                df.groupby(cov_bin)["gain_rank_pct"]
+                  .rank(pct=True, method="average")
+                  .fillna(0.0)
+            )
+            gain_high = df["gain_rank_pct_by_coverage"] > 0.7
+        else:
+            gain_high = df["gain_rank_pct"] > 0.7
+
         # Quadrant labels — expose what probing adds vs what IV already said.
         iv_high = df["iv"].rank(pct=True) > 0.7
-        gain_high = df["gain_rank_pct"] > 0.7
         df["discover"] = (~iv_high) & gain_high
         df["stable"]   = iv_high & gain_high
         df["interp"]   = iv_high & (~gain_high)
@@ -271,8 +295,9 @@ def _apply_column_ordering(df, mapping):
         "iv", "monotonic", "missing_n", "missing_woe",
         "psi", "flag", "psi_over_cutoff",
         "lift_at_k", "gini", "concentration",
-        "probe_gain", "probe_weight", "probe_cover",
+        "probe_gain", "probe_weight", "probe_cover", "coverage",
         "gain_rank_pct", "weight_rank_pct", "cover_rank_pct",
+        "gain_rank_pct_by_coverage",
         "corr_cluster",
         "family_size", "in_family_rank", "family_kept",
         "group_size", "in_group_rank", "group_kept",

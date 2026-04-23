@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 # Defaults applied when cfg.analysis.probing.xgb_params is sparse/missing.
+# colsample_bynode (not bytree): at each split node XGBoost re-samples 80% of
+# columns. For high-dim sparse inputs this is preferable to per-tree sampling —
+# a sparse feature with real signal has many more chances to be considered,
+# rather than being absent from an entire tree because that tree's bytree
+# sample missed it.
 _DEFAULT_XGB_PARAMS = {
     "objective": "binary:logistic",
     "tree_method": "hist",
@@ -37,7 +42,7 @@ _DEFAULT_XGB_PARAMS = {
     "max_depth": 6,
     "eta": 0.1,
     "subsample": 0.8,
-    "colsample_bytree": 0.8,
+    "colsample_bynode": 0.8,
     "min_child_weight": 1.0,
     "lambda": 1.0,
     "verbosity": 0,
@@ -141,6 +146,37 @@ def _rank_pct(series):
     return r.fillna(0.0)
 
 
+def _feature_coverage(X_csr, missing_value, n_features):
+    """Per-feature non-missing ratio on the rows used for training.
+
+    Mirrors the DMatrix `missing` semantic so the reported coverage matches
+    what the tree actually sees:
+      - missing=0.0 → coverage = fraction of rows with an explicit non-NaN
+        entry (cache stores no explicit zeros, so any CSR entry that is not
+        NaN is a real observation).
+      - missing=NaN → coverage = fraction of rows where the cell is not NaN
+        (implicit zeros count as observed).
+
+    Exposing coverage lets downstream ranking distinguish a sparse feature
+    with weak signal from a sparse feature whose low gain is just low support.
+    """
+    n_rows = int(X_csr.shape[0])
+    out = np.zeros(int(n_features), dtype=np.float64)
+    if n_rows == 0:
+        return out
+    data = X_csr.data
+    cols = X_csr.indices
+    nan_mask = np.isnan(data)
+    is_nan_missing = isinstance(missing_value, float) and np.isnan(missing_value)
+    if is_nan_missing:
+        nan_per_col = np.bincount(cols[nan_mask], minlength=int(n_features))
+        nonmissing = n_rows - nan_per_col
+    else:
+        nonmissing = np.bincount(cols[~nan_mask], minlength=int(n_features))
+    out[:] = nonmissing.astype(np.float64) / float(n_rows)
+    return out
+
+
 def run_probing(cfg, cache_dir, out_dir):
     """Train probing model → write probing_importance.csv + probing_meta.json.
 
@@ -210,6 +246,13 @@ def run_probing(cfg, cache_dir, out_dir):
     imp_df["gain_rank_pct"] = _rank_pct(imp_df["gain"])
     imp_df["weight_rank_pct"] = _rank_pct(imp_df["weight"])
     imp_df["cover_rank_pct"] = _rank_pct(imp_df["cover"])
+
+    # 6b) Per-feature coverage on the rows the model actually fit (train+valid).
+    # Aligned to feature_names order before the sort.
+    fit_mask = tr_mask | va_mask
+    coverage = _feature_coverage(X[fit_mask], missing_value, X.shape[1])
+    imp_df["coverage"] = coverage
+
     imp_df = imp_df.sort_values("gain", ascending=False).reset_index(drop=True)
 
     # 7) Write artifacts — probing_importance.csv lives next to summary.csv
@@ -232,6 +275,7 @@ def run_probing(cfg, cache_dir, out_dir):
         "early_stopping_rounds": early_stopping,
         "best_iteration": best_iter,
         "best_valid_aucpr": best_score,
+        "coverage_basis": "train_plus_valid_rows",
         "cache_dir": str(cache_dir),
     }
     (out_dir / "probing_meta.json").write_text(

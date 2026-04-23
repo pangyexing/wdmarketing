@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from build_sparse_cache import build_sparse_cache, load_cache  # noqa: E402
 from wdm.analysis.probing import (  # noqa: E402
-    _resolve_missing_value, _rank_pct, run_probing,
+    _feature_coverage, _resolve_missing_value, _rank_pct, run_probing,
 )
 
 
@@ -187,6 +187,48 @@ def test_resolve_missing_value_opt_out_falls_back_to_sentinels():
     assert v2 == 0.0
 
 
+def test_feature_coverage_matches_missing_semantic():
+    """Coverage must follow the DMatrix `missing` convention exactly:
+    with missing=0.0 structural zeros are missing, with missing=NaN they aren't.
+    """
+    # 4 rows × 3 features:
+    #   f0: [1.5, 0,    NaN, 2.5]  → 2 explicit real, 1 NaN, 1 implicit 0
+    #   f1: [0,   NaN,  3.0, 0  ]  → 1 explicit real, 1 NaN, 2 implicit 0
+    #   f2: [0,   0,    0,   0  ]  → all implicit zeros
+    df = pd.DataFrame({
+        "f0": [1.5, 0.0,    np.nan, 2.5],
+        "f1": [0.0, np.nan, 3.0,    0.0],
+        "f2": [0.0, 0.0,    0.0,    0.0],
+    })
+    # Build CSR directly mirroring build_sparse_cache's convention:
+    # zeros stay implicit, NaN is explicit.
+    rows, cols, vals = [], [], []
+    for j, c in enumerate(df.columns):
+        for i, v in enumerate(df[c].values):
+            if pd.isna(v):
+                rows.append(i); cols.append(j); vals.append(np.nan)
+            elif v != 0:
+                rows.append(i); cols.append(j); vals.append(float(v))
+    X = sp.csr_matrix((vals, (rows, cols)), shape=(4, 3))
+
+    # missing=0.0 → only explicit non-NaN entries count as observed.
+    cov_zero = _feature_coverage(X, 0.0, n_features=3)
+    # f0: 2 real / 4 = 0.5; f1: 1/4 = 0.25; f2: 0/4 = 0.
+    np.testing.assert_allclose(cov_zero, [0.5, 0.25, 0.0])
+
+    # missing=NaN → implicit zeros are observed; only explicit NaN is missing.
+    cov_nan = _feature_coverage(X, np.nan, n_features=3)
+    # f0: 4 - 1 NaN = 3/4 = 0.75; f1: 4 - 1 = 0.75; f2: 4 - 0 = 1.0.
+    np.testing.assert_allclose(cov_nan, [0.75, 0.75, 1.0])
+
+
+def test_feature_coverage_handles_empty_matrix():
+    X = sp.csr_matrix((0, 5))
+    cov = _feature_coverage(X, 0.0, n_features=5)
+    assert cov.shape == (5,)
+    assert (cov == 0).all()
+
+
 def test_rank_pct_is_bounded_and_monotonic():
     s = pd.Series([0.0, 1.0, 2.0, 3.0, np.nan])
     r = _rank_pct(s)
@@ -218,8 +260,10 @@ def test_probing_runs_end_to_end_and_is_deterministic(tmp_path):
     r1 = run_probing(cfg, cache_dir=out_dir, out_dir=report_dir)
     imp1 = pd.read_csv(r1["importance_path"])
     assert set(["feature", "gain", "weight", "cover",
-                "gain_rank_pct"]).issubset(imp1.columns)
+                "gain_rank_pct", "coverage"]).issubset(imp1.columns)
     assert (imp1["gain"] >= 0).all()
+    # Coverage is a ratio in [0,1] on the rows the model fit.
+    assert (imp1["coverage"] >= 0).all() and (imp1["coverage"] <= 1).all()
 
     # Fresh output dir: run again, compare rankings.
     report_dir2 = tmp_path / "report2"
