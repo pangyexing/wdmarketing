@@ -1,0 +1,15 @@
+# Python 3.6 locked versions — see implementation-plan.md § Python 3.6 Compatibility
+xgboost==1.5.2
+shap<0.42           # 0.41.0 happens to work on 3.6
+hyperopt<0.2.7
+py4j                # transitive for hyperopt.spark import guard
+numpy<1.20
+pandas<1.2
+scikit-learn<0.25
+matplotlib<3.4
+seaborn<0.12
+pyyaml
+jsonschema<4
+dataclasses         # 3.6 backport
+pytest
+# openpyxl intentionally omitted — target machine may lack it; report falls back to CSV + HTML

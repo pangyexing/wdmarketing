@@ -1,0 +1,16 @@
+feature,feature_cn
+age,年龄
+job,职业
+marital,婚姻状况
+education,教育程度
+default,是否有信用违约
+balance,账户年均余额
+housing,是否有房贷
+loan,是否有个人贷款
+contact,联系方式
+duration,最近一次通话时长
+campaign,本次活动联系次数
+pdays,距上次活动天数
+previous,历史联系次数
+poutcome,上次活动结果
+y,是否订购定期存款

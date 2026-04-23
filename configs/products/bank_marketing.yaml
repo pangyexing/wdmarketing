@@ -1,0 +1,63 @@
+name: bank_marketing
+
+data:
+  train_path: data/bank_marketing.csv
+  oot_path: null
+  time_column: null
+  time_format: yyyymmdd
+  label_column: y
+  id_columns: []
+  treatment_column: null
+  column_mapping: configs/products/bank_marketing_columns.csv
+
+missing:
+  # global.missing inherited from configs/global.yaml.
+  # UCI bank_marketing columns are pre-encoded numerics; default "0/negative/empty = missing"
+  # would corrupt legitimate zeros. Override per column:
+  per_column:
+    balance:
+      treat_negative_as_missing: false    # account balance can legitimately be negative
+      sentinels: []                        # 0 balance is a real state
+      fill_strategy: median
+    previous:
+      sentinels: []                        # 0 = never contacted before (legitimate)
+      treat_negative_as_missing: false
+    pdays:
+      sentinels: [-1]                      # -1 = never contacted (UCI sentinel)
+      treat_negative_as_missing: false
+      fill_strategy: special
+      fill_value: -1
+      treat_as_missing_in_woe: true
+    duration:
+      sentinels: []                        # 0 = not reached
+      treat_negative_as_missing: false
+    campaign:
+      sentinels: []
+      treat_negative_as_missing: false
+    age:
+      sentinels: []
+      treat_negative_as_missing: false
+    # label-encoded categoricals: 0 is a valid category, disable sentinel
+    job: {sentinels: [], treat_negative_as_missing: false}
+    marital: {sentinels: [], treat_negative_as_missing: false}
+    education: {sentinels: [], treat_negative_as_missing: false}
+    default: {sentinels: [], treat_negative_as_missing: false}
+    housing: {sentinels: [], treat_negative_as_missing: false}
+    loan: {sentinels: [], treat_negative_as_missing: false}
+    contact: {sentinels: [], treat_negative_as_missing: false}
+    poutcome: {sentinels: [], treat_negative_as_missing: false}
+
+selected_features:
+  active_version: v1_auto
+  versions_dir: artifacts/bank_marketing/selected_features
+
+feature_groups:
+  semantic_groups: []       # UCI has no semantic clusters
+
+analysis_overrides:
+  iv_min: 0.02
+
+training_overrides:
+  top_k_pct: 0.10
+  final_feature_count: 14
+  hyperopt_max_evals: 30

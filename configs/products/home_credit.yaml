@@ -1,0 +1,58 @@
+name: home_credit
+
+data:
+  train_path: data/home_credit_wide.csv
+  oot_path: null
+  time_column: null            # wide table has no time column; use stratified split
+  time_format: yyyymmdd
+  label_column: TARGET
+  id_columns: [SK_ID_CURR]
+  treatment_column: null
+  column_mapping: configs/products/home_credit_columns.csv
+
+missing:
+  # Aggregated Home Credit features are legitimately 0 (no events in window),
+  # can be negative (DAYS_*), and empty when a customer has no records in a
+  # table at all. Defaults of "0/neg/empty → missing + fill -999" are wrong —
+  # override at the global level here.
+  global:
+    sentinels: []              # don't treat 0 as missing
+    treat_negative_as_missing: false   # DAYS_* columns are negative by design
+    treat_empty_as_missing: true       # actual null values are true missing
+    fill_strategy: constant
+    fill_constant: -999
+    analysis_use_mask: true
+    generate_missing_indicator: false
+    indicator_threshold: 0.10
+    fill_value_sanity_check: true
+
+feature_groups:
+  # Home Credit engineered features use <table>_<col>_<agg>_<window> naming
+  # with windows 30d/90d/180d/360d/all — matches the default window_pattern.
+  #
+  # Business-semantic groups across the engineered columns — every table
+  # prefix becomes a declared group so the selector can curate them.
+  # max_keep is left large (we are not trying to cut per group; we want
+  # to SEE the group structure in the report).
+  semantic_groups:
+    # Prefix-based matching — every engineered column whose name starts with
+    # <prefix> joins its group automatically. No need to enumerate features.
+    - {name: bureau,  description: 信用局 — 其他金融机构历史信贷记录, feature_prefix: "bureau_", max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    - {name: prev,    description: 历史贷款申请,                       feature_prefix: "prev_",   max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    - {name: instal,  description: 分期还款历史,                       feature_prefix: "instal_", max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    - {name: pos,     description: POS 现金贷款状态,                   feature_prefix: "pos_",    max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    - {name: cc,      description: 信用卡余额历史,                     feature_prefix: "cc_",     max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+
+selected_features:
+  active_version: v1_auto
+  versions_dir: artifacts/home_credit/selected_features
+
+analysis_overrides:
+  iv_min: 0.005              # lower bar — HC features are weaker than UCI's duration
+  corr_cutoff: 0.95
+  per_feature_plot_top_n: 30 # keep plot generation bounded
+
+training_overrides:
+  top_k_pct: 0.10
+  final_feature_count: 200   # plan default — target deploy size
+  hyperopt_max_evals: 20     # wall-time friendly; bump to 50+ for production runs
