@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,7 @@ from wdm.analysis.family import (
     build_families_summary,
     build_semantic_groups_summary,
     discover_derivation_candidates,
+    effective_family_policy,
     parse_families,
     parse_semantic_groups,
     rank_within_family,
@@ -97,34 +98,57 @@ def _apply_hard_filters(df, cfg):
     return df
 
 
-def _window_penalty_series(df, cfg):
-    """Map each row's canonical `window` through family_policy.window_penalty_table.
-
-    Unknown / None windows get 0. If the table is missing, falls back to a
-    linear schedule over window_order (i/len(order) * 0.3). Returns a float
-    pandas Series aligned to df's index.
-    """
-    policy = (cfg.get("feature_groups") or {}).get("family_policy") or {}
+def _penalty_table_for(policy, cfg):
+    """Resolve window_penalty_table for a given effective policy; fall back to linear."""
     table = policy.get("window_penalty_table") or {}
     table = {str(k): float(v) for k, v in table.items()}
     if not table:
         order = list((cfg.get("feature_groups") or {}).get("window_order") or [])
         n = max(len(order), 1)
         table = {w: (i / n) * 0.3 for i, w in enumerate(order)}
-    return df["window"].map(lambda w: table.get(w, 0.0) if isinstance(w, str) else 0.0).astype(float)
+    return table
+
+
+def _row_penalty_contribution(df, cfg):
+    """Per-row `gamma * penalty(window)` resolved from each row's semantic_group.
+
+    When a semantic_group declares its own family_policy, that row uses the
+    group's gamma and penalty_table; otherwise falls back to the global policy.
+    Rows without a canonical string window contribute 0.
+    """
+    default_policy = (cfg.get("feature_groups") or {}).get("family_policy") or {}
+    # Pre-resolve per semantic_group to avoid repeated dict merges.
+    group_policies: Dict[Optional[str], Dict[str, Any]] = {None: default_policy}
+    seen_groups = df.get("semantic_group")
+    if seen_groups is not None:
+        for g in seen_groups.dropna().unique():
+            group_policies[str(g)] = effective_family_policy(str(g), cfg)
+    group_gamma = {g: float(p.get("window_penalty_gamma", 0.0))
+                   for g, p in group_policies.items()}
+    group_table = {g: _penalty_table_for(p, cfg) for g, p in group_policies.items()}
+
+    def _score(row):
+        w = row.get("window")
+        if not isinstance(w, str):
+            return 0.0
+        g = row.get("semantic_group")
+        key = str(g) if isinstance(g, str) else None
+        tbl = group_table.get(key, group_table[None])
+        gamma = group_gamma.get(key, group_gamma[None])
+        return gamma * float(tbl.get(w, 0.0))
+
+    return df.apply(_score, axis=1).astype(float)
 
 
 def _rank_and_auto_keep(df, cfg):
     df = df.copy()
-    policy = (cfg.get("feature_groups") or {}).get("family_policy") or {}
-    gamma = float(policy.get("window_penalty_gamma", 0.0))
     df["rank_score"] = (
         _zscore(df["iv"])
         + _zscore(df["lift_at_k"])
         + _zscore(df["gini"])
         - 1.0 * _zscore(df["psi"])
         - 0.5 * (df["missing_rate"] > 0.5).astype(float)
-        - gamma * _window_penalty_series(df, cfg)
+        - _row_penalty_contribution(df, cfg)
     )
 
     # Within each correlation cluster, only the top-score survivor passes.

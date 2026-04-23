@@ -14,6 +14,7 @@ import pytest
 from wdm.analysis.family import (
     _WINDOW_PATTERN_PRESETS,
     _resolve_patterns,
+    effective_family_policy,
     parse_families,
     rank_within_family,
 )
@@ -236,3 +237,102 @@ def test_window_penalty_demotes_long_when_equal():
     # 7d penalty 0.0, all penalty 0.4 → 7d strictly higher rank_score
     assert rs["foo_7d"] > rs["foo_all"]
     assert abs((rs["foo_7d"] - rs["foo_all"]) - 0.5 * 0.4) < 1e-9
+
+
+# ---------- Stage 3 — semantic-group-level family_policy override ----------
+
+def test_effective_family_policy_merges_group_override():
+    cfg = {
+        "feature_groups": {
+            "family_policy": {
+                "prefer": "best_iv_short_bias",
+                "window_penalty_gamma": 0.15,
+                "max_per_family": 2,
+            },
+            "semantic_groups": [
+                {"name": "bureau", "family_policy": {"prefer": "best_iv",
+                                                     "window_penalty_gamma": 0.0}},
+                {"name": "cc"},  # no override — inherits global
+            ],
+        }
+    }
+    bureau = effective_family_policy("bureau", cfg)
+    cc = effective_family_policy("cc", cfg)
+    none_group = effective_family_policy(None, cfg)
+    assert bureau["prefer"] == "best_iv"
+    assert bureau["window_penalty_gamma"] == 0.0
+    assert bureau["max_per_family"] == 2  # fell through from global
+    assert cc["prefer"] == "best_iv_short_bias"
+    assert cc["window_penalty_gamma"] == 0.15
+    assert none_group["prefer"] == "best_iv_short_bias"
+
+
+def test_rank_within_family_uses_group_override_for_anchored_family():
+    cfg = {
+        "feature_groups": {
+            "family_policy": {"prefer": "best_iv_short_bias",
+                              "coverage_bias_iv_tolerance": 0.02,
+                              "max_per_family": 2},
+            "semantic_groups": [
+                {"name": "bureau", "family_policy": {"prefer": "best_iv"}},
+            ],
+        }
+    }
+    # bureau-anchored family: global says short_bias (would pick 7d),
+    # but bureau override says best_iv → picks `all` (higher IV).
+    rep = pd.DataFrame([
+        {"feature": "bureau_amt_7d",  "family_base": "bureau_amt",
+         "window": "7d",  "window_rank": 0, "iv": 0.18,
+         "semantic_group": "bureau"},
+        {"feature": "bureau_amt_all", "family_base": "bureau_amt",
+         "window": "all", "window_rank": 3, "iv": 0.19,
+         "semantic_group": "bureau"},
+        # cc-anchored family: no override → uses global short_bias (picks 7d)
+        {"feature": "cc_bal_7d",  "family_base": "cc_bal",
+         "window": "7d",  "window_rank": 0, "iv": 0.18,
+         "semantic_group": "cc"},
+        {"feature": "cc_bal_all", "family_base": "cc_bal",
+         "window": "all", "window_rank": 3, "iv": 0.19,
+         "semantic_group": "cc"},
+    ])
+    out = rank_within_family(rep, cfg).set_index("feature")
+    # bureau → best_iv picks highest IV → all is rank 1
+    assert out.loc["bureau_amt_all", "in_family_rank"] == 1
+    assert out.loc["bureau_amt_7d", "in_family_rank"] == 2
+    # cc → short_bias → 7d within tol wins
+    assert out.loc["cc_bal_7d", "in_family_rank"] == 1
+    assert out.loc["cc_bal_all", "in_family_rank"] == 2
+
+
+def test_row_penalty_respects_per_group_gamma():
+    """Two identical rows, different semantic groups, different effective gamma
+    → different rank_score."""
+    cfg = {
+        "feature_groups": {
+            "window_pattern": _WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
+            "window_order": ["7d", "30d", "90d", "all"],
+            "family_policy": {
+                "window_penalty_gamma": 0.5,
+                "window_penalty_table": {"7d": 0.0, "30d": 0.1, "90d": 0.2, "all": 0.4},
+            },
+            "semantic_groups": [
+                {"name": "bureau", "family_policy": {"window_penalty_gamma": 0.0}},
+            ],
+        },
+        "analysis": {},
+    }
+    df = pd.DataFrame([
+        {"feature": "bureau_amt_all", "window": "all", "iv": 0.2, "lift_at_k": 1.5,
+         "gini": 0.2, "psi": 0.05, "missing_rate": 0.1,
+         "family_kept": True, "group_kept": True, "corr_cluster": -1,
+         "semantic_group": "bureau", "_hard_drop_reason": ""},
+        {"feature": "cc_bal_all", "window": "all", "iv": 0.2, "lift_at_k": 1.5,
+         "gini": 0.2, "psi": 0.05, "missing_rate": 0.1,
+         "family_kept": True, "group_kept": True, "corr_cluster": -1,
+         "semantic_group": "cc", "_hard_drop_reason": ""},
+    ])
+    out = _rank_and_auto_keep(df.copy(), cfg)
+    rs = out.set_index("feature")["rank_score"]
+    # bureau gamma=0 → zero penalty contribution; cc uses global 0.5 → −0.5*0.4 = −0.2
+    # Both have identical z-scored signals (zero since equal), so diff is exactly 0.2
+    assert abs((rs["bureau_amt_all"] - rs["cc_bal_all"]) - 0.5 * 0.4) < 1e-9

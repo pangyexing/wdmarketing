@@ -251,20 +251,64 @@ def parse_semantic_groups(features, cfg):
     return df, missing_by_group
 
 
+def effective_family_policy(semantic_group_name: Optional[str],
+                            cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve the family_policy for a given semantic group name.
+
+    Start from `feature_groups.family_policy` (the global default) and layer
+    the group's own `family_policy` on top. Missing keys fall through. When
+    `semantic_group_name` is None or the group has no override, the global
+    default is returned verbatim.
+
+    Example config:
+        feature_groups:
+          family_policy:
+            prefer: best_iv_short_bias
+            window_penalty_gamma: 0.15
+          semantic_groups:
+            - name: bureau
+              feature_prefix: "bureau_"
+              family_policy:
+                prefer: best_iv          # bureau keeps long-window features
+                window_penalty_gamma: 0.0
+    """
+    default = dict((cfg.get("feature_groups") or {}).get("family_policy") or {})
+    if not semantic_group_name:
+        return default
+    groups = (cfg.get("feature_groups") or {}).get("semantic_groups") or []
+    for g in groups:
+        if g.get("name") != semantic_group_name:
+            continue
+        override = g.get("family_policy")
+        if not override:
+            return default
+        merged = dict(default)
+        merged.update(override)
+        return merged
+    return default
+
+
+def _family_anchor_group(block: pd.DataFrame) -> Optional[str]:
+    """Return the semantic_group a family is anchored to, or None if mixed / unset."""
+    if "semantic_group" not in block.columns:
+        return None
+    vals = block["semantic_group"].dropna().unique().tolist()
+    if len(vals) == 1:
+        return str(vals[0])
+    return None
+
+
 def rank_within_family(feature_report, cfg):
     """Annotate feature_report with family_size, in_family_rank, family_kept.
 
     Expects feature_report to already contain family_base, window, window_rank, iv.
+    When the report has a `semantic_group` column and a group declares its own
+    `family_policy`, that override takes effect for families anchored to it.
     """
-    policy = cfg["feature_groups"]["family_policy"]
-    prefer = policy.get("prefer", "best_iv")
-    max_per = int(policy.get("max_per_family", 2))
-    tol = float(policy.get("coverage_bias_iv_tolerance", 0.02))
-
     df = feature_report.copy()
     df["family_size"] = df.groupby("family_base")["feature"].transform("size").astype(int)
 
-    def _rank_block(block):
+    def _rank_block(block, prefer, tol):
         if prefer == "best_iv":
             return block.sort_values("iv", ascending=False).reset_index()
         if prefer == "shortest":
@@ -296,7 +340,12 @@ def rank_within_family(feature_report, cfg):
             df.loc[block.index, "in_family_rank"] = 1
             df.loc[block.index, "family_kept"] = True
             continue
-        ranked = _rank_block(block)
+        anchor = _family_anchor_group(block)
+        policy = effective_family_policy(anchor, cfg)
+        prefer = policy.get("prefer", "best_iv")
+        max_per = int(policy.get("max_per_family", 2))
+        tol = float(policy.get("coverage_bias_iv_tolerance", 0.02))
+        ranked = _rank_block(block, prefer, tol)
         for rank, orig_idx in enumerate(ranked["index"], start=1):
             df.loc[orig_idx, "in_family_rank"] = rank
             df.loc[orig_idx, "family_kept"] = (rank <= max_per)

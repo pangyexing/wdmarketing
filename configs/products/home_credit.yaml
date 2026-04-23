@@ -3,7 +3,7 @@ name: home_credit
 data:
   train_path: data/home_credit_wide.csv
   oot_path: null
-  time_column: null            # wide table has no time column; use stratified split
+  time_column: yyyymmdd        # synthesized from SK_ID_CURR rank, spans 2022-01-01 → 2024-12-31
   time_format: yyyymmdd
   label_column: TARGET
   id_columns: [SK_ID_CURR]
@@ -19,8 +19,10 @@ missing:
     sentinels: []              # don't treat 0 as missing
     treat_negative_as_missing: false   # DAYS_* columns are negative by design
     treat_empty_as_missing: true       # actual null values are true missing
-    fill_strategy: constant
-    fill_constant: -999
+    # HC columns span both positive (amounts) and negative (DAYS_*) domains,
+    # so no single constant can sit outside every observed range. Let XGBoost
+    # handle NaN natively — it learns the missing branch at each split.
+    fill_strategy: keep_nan
     analysis_use_mask: true
     generate_missing_indicator: false
     indicator_threshold: 0.10
@@ -30,6 +32,13 @@ feature_groups:
   # Home Credit engineered features use <table>_<col>_<agg>_<window> naming
   # with windows 30d/90d/180d/360d/all — matches the default window_pattern.
   #
+  # Global nudge: short-window siblings that are within IV tolerance of their
+  # long-window counterpart win; long windows take a small rank_score penalty.
+  # Bureau and prev (long-dated by nature) opt out of the bias.
+  family_policy:
+    prefer: best_iv_short_bias
+    window_penalty_gamma: 0.15
+    coverage_bias_iv_tolerance: 0.02
   # Business-semantic groups across the engineered columns — every table
   # prefix becomes a declared group so the selector can curate them.
   # max_keep is left large (we are not trying to cut per group; we want
@@ -37,8 +46,14 @@ feature_groups:
   semantic_groups:
     # Prefix-based matching — every engineered column whose name starts with
     # <prefix> joins its group automatically. No need to enumerate features.
-    - {name: bureau,  description: 信用局 — 其他金融机构历史信贷记录, feature_prefix: "bureau_", max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
-    - {name: prev,    description: 历史贷款申请,                       feature_prefix: "prev_",   max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    # Bureau: long-dated credit-bureau records; long windows are genuinely
+    # more informative here, so override back to best_iv.
+    - {name: bureau,  description: 信用局 — 其他金融机构历史信贷记录, feature_prefix: "bureau_", max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90,
+       family_policy: {prefer: best_iv, window_penalty_gamma: 0.0}}
+    # Prev: prior applications span a customer's whole history — also long-dated.
+    - {name: prev,    description: 历史贷款申请,                       feature_prefix: "prev_",   max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90,
+       family_policy: {prefer: best_iv, window_penalty_gamma: 0.0}}
+    # Instal / pos / cc: payment / POS / credit-card behaviour — recency matters.
     - {name: instal,  description: 分期还款历史,                       feature_prefix: "instal_", max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
     - {name: pos,     description: POS 现金贷款状态,                   feature_prefix: "pos_",    max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
     - {name: cc,      description: 信用卡余额历史,                     feature_prefix: "cc_",     max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
@@ -55,4 +70,7 @@ analysis_overrides:
 training_overrides:
   top_k_pct: 0.10
   final_feature_count: 200   # plan default — target deploy size
-  hyperopt_max_evals: 20     # wall-time friendly; bump to 50+ for production runs
+  hyperopt_max_evals: 2      # smoke test; bump to 20-50 for real runs
+  split:
+    strategy: time           # exercise yyyymmdd-based time split end-to-end
+    ratios: [0.70, 0.15, 0.15]
