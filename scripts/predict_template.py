@@ -1,8 +1,11 @@
 """predict.py template — single-file deployment script.
 
-The exporter string-substitutes the constants at the top of this file (model
-bundle filenames and feature list) and writes the rendered copy to the
-model run dir. Keep this file self-contained — only use xgboost/numpy/pandas/json/argparse.
+The exporter copies this file verbatim into the model run directory alongside
+the bundle artifacts (booster.json, feature_list.txt, missing_spec.json,
+run_manifest.json, validation_samples.csv). predict.py resolves every bundle
+file relative to its own location, so no post-copy substitution happens.
+
+Keep this file self-contained — only use xgboost/numpy/pandas/json/argparse.
 
 Contract:
   * Input CSV = raw business data. Missing values, sentinels, negatives, empty
@@ -97,6 +100,30 @@ class Predictor(object):
         self.indicator_features = [f for f in self.feature_list if f.endswith("__isnan")]
         self.base_features = [f for f in self.feature_list if not f.endswith("__isnan")]
 
+        # best_iteration: prefer the manifest value (exporter stamps it from
+        # the live booster) over booster.best_iteration, since the attribute
+        # may or may not survive save/load across xgboost versions. Falling
+        # back to the attribute keeps this predict.py compatible with older
+        # bundles that predate the manifest field.
+        self.best_iteration = None
+        manifest_path = self.bundle / "run_manifest.json"
+        if manifest_path.is_file():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    mf = json.load(f)
+                bi = mf.get("best_iteration")
+                if bi is not None:
+                    self.best_iteration = int(bi)
+            except (ValueError, OSError, TypeError):
+                pass
+        if self.best_iteration is None:
+            bi_attr = getattr(self.booster, "best_iteration", None)
+            if bi_attr is not None:
+                try:
+                    self.best_iteration = int(bi_attr)
+                except (TypeError, ValueError):
+                    pass
+
         # Verify feature_list.txt is consistent with the booster. A silent
         # mismatch would produce plausible-looking but wrong scores because
         # XGBoost's positional DMatrix has no way to flag reordered columns.
@@ -167,12 +194,14 @@ class Predictor(object):
     def predict_proba(self, df_raw):
         X = self._apply(df_raw)
         dmat = xgb.DMatrix(X)
-        try:
-            best_iter = getattr(self.booster, "best_iteration", None)
-            if best_iter is not None:
-                return self.booster.predict(dmat, iteration_range=(0, best_iter + 1))
-        except Exception:
-            pass
+        if self.best_iteration is not None:
+            try:
+                return self.booster.predict(
+                    dmat, iteration_range=(0, self.best_iteration + 1))
+            except Exception:
+                # Older xgboost variants don't accept iteration_range; fall
+                # through to the all-trees prediction below.
+                pass
         return self.booster.predict(dmat)
 
 

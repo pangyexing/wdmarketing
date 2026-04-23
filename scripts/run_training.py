@@ -59,9 +59,8 @@ def main():
     # 4. Evaluate
     metrics_df, binned, scores, imp_df = evaluate_all(booster, data, cfg)
     audit_df = family_importance_audit(imp_df, cfg)
-    manifest_stub = {"evals_train_history": evals_result}
     write_metrics_artifacts(run_dir, metrics_df, binned, imp_df, audit_df,
-                             manifest_stub, best_params)
+                            best_params)
 
     # 5. Plots
     make_all_model_plots(cfg, booster, data, scores, binned, imp_df,

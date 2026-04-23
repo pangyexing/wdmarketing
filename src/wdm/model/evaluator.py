@@ -131,7 +131,9 @@ def family_importance_audit(importance_df, cfg):
 
 
 def write_metrics_artifacts(out_dir, metrics_df, binned, imp_df, audit_df,
-                            run_manifest, best_params):
+                            best_params):
+    # run_manifest.json is owned by exporter.export_bundle — writing it here
+    # would get clobbered and drop fields the exporter set.
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "metrics.json").write_text(
@@ -141,8 +143,6 @@ def write_metrics_artifacts(out_dir, metrics_df, binned, imp_df, audit_df,
         df.to_csv(out_dir / "binned_lift_{0}.csv".format(name), index=False)
     if audit_df is not None and len(audit_df):
         audit_df.to_csv(out_dir / "family_gain_audit.csv", index=False)
-    with open(out_dir / "run_manifest.json", "w", encoding="utf-8") as f:
-        json.dump(run_manifest, f, ensure_ascii=False, indent=2)
     with open(out_dir / "best_params.json", "w", encoding="utf-8") as f:
         json.dump(best_params, f, ensure_ascii=False, indent=2)
 

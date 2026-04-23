@@ -244,7 +244,17 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
     val_df.to_csv(run_dir / "validation_samples.csv", index=False)
 
     # 6. run_manifest.json
-    import yaml
+    # best_iteration is captured from the live booster so predict.py can read
+    # it without relying on the attribute surviving xgboost save/load across
+    # versions. None means "no early stopping kicked in" — predict.py will
+    # then use all trees, matching the booster's default behavior.
+    best_iteration = getattr(booster, "best_iteration", None)
+    if best_iteration is not None:
+        try:
+            best_iteration = int(best_iteration)
+        except (TypeError, ValueError):
+            best_iteration = None
+
     manifest = {
         "run_id": run_id,
         "product": cfg["name"],
@@ -252,6 +262,7 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "random_seed": cfg["training"]["random_seed"],
         "xgb_version": xgb.__version__,
+        "best_iteration": best_iteration,
         "n_features_total": len(data.feature_list),
         "n_features_base": len(data.base_feature_list),
         "n_features_indicator": len(data.indicator_features),
@@ -265,6 +276,7 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "family_policy": cfg["feature_groups"].get("family_policy", {}),
         "correlation_thresholds": _correlation_thresholds(cfg),
         "stage1_probing": _probing_fingerprint(cfg),
+        "evals_train_history": evals_result,
     }
     with open(run_dir / "run_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2, default=str)
