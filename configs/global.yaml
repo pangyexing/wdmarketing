@@ -61,12 +61,53 @@ missing:
 
 analysis:
   missing_rate_max: 0.95
+  # PSI knobs. psi_cutoff stays at 0.25 for the informational threshold,
+  # but psi_mode controls whether crossing it drops the feature.
+  #   soft (default): PSI only dampens rank_score; feature stays in pool.
+  #   hard          : legacy behavior — psi >= psi_cutoff drops the feature.
+  #   off           : PSI ignored by selection; reported in CSV only.
+  # Rationale: tree models often extract conditional signal from drifted
+  # features; hard PSI cuts throw away usable information, especially for
+  # synthesized/placeholder time columns where PSI is itself noisy.
   psi_cutoff: 0.25
+  psi_mode: soft
+  psi_penalty_weight: 0.25       # weight on z(psi) in rank_score (was effectively 1.0)
   iv_min: 0.02
   corr_cutoff: 0.95
   n_bins: 10
   binning: equal_freq            # equal_freq | tree
   per_feature_plot_top_n: 50
+  # Optional Stage-1 probing model. When enabled, a cheap XGBoost trains on
+  # the sparse cache (see scripts/build_sparse_cache.py) and writes
+  # probing_importance.csv into the report dir. selector.py merges
+  # gain_rank_pct into rank_score so interaction-level signal (not captured
+  # by univariate IV) can influence v1_auto.txt. Disabled by default:
+  # products opt in via analysis_overrides.probing.enabled.
+  probing:
+    enabled: false
+    cache_dir: null              # defaults to data/cache/<product>/
+    weight_in_rank_score: 0.25   # 0 disables contribution even when enabled
+    # Whether the probing model treats 0 as missing. Default true because
+    # for sparse aggregated tables (home_credit) a 0 count carries the same
+    # "no contribution" meaning as a NaN record — collapsing them gives
+    # cleaner splits. Set to false to defer to missing.global.sentinels
+    # (e.g. if a product legitimately has 0 as a signal the probing model
+    # should learn from). This flag only affects probing; Stage 2 training
+    # / deployment always follow missing.global.* unchanged.
+    treat_zero_as_missing: true
+    num_boost_round: 300
+    early_stopping_rounds: 30
+    xgb_params:
+      objective: binary:logistic
+      tree_method: hist
+      eval_metric: aucpr
+      max_depth: 6
+      eta: 0.1
+      subsample: 0.8
+      colsample_bytree: 0.8
+      min_child_weight: 1.0
+      lambda: 1.0
+      verbosity: 0
 
 training:
   top_k_pct: 0.10

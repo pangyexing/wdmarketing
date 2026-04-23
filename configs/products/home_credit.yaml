@@ -66,6 +66,17 @@ analysis_overrides:
   iv_min: 0.005              # lower bar — HC features are weaker than UCI's duration
   corr_cutoff: 0.95
   per_feature_plot_top_n: 30 # keep plot generation bounded
+  # HC is sparse (~85% NaN/0), so univariate IV under-estimates features whose
+  # signal lives in interactions (ratios, windowed deltas). Enable probing:
+  # a cheap XGBoost on the CSR cache surfaces gain-based importance that
+  # selector.py blends into rank_score. Build the cache first:
+  #   PYTHONPATH=src python3 scripts/build_sparse_cache.py --product home_credit
+  probing:
+    enabled: true
+    cache_dir: data/cache/home_credit   # explicit so manifests stay discoverable
+    weight_in_rank_score: 0.25
+    num_boost_round: 300
+    early_stopping_rounds: 30
 
 training_overrides:
   top_k_pct: 0.10

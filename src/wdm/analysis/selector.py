@@ -1,14 +1,26 @@
 """Stage-1 exit module: combines PSI / IV / Lift / correlation / family signals
 into a single ranked feature report, writes CSVs + index.html + v1_auto.txt.
 
-Rank score: rank_score = z(iv) + z(lift_at_k) + z(gini) − α·z(psi) − β·1[missing>threshold]
+Rank score:
+    rank_score = z(iv) + z(lift_at_k) + z(gini)
+               − psi_penalty_weight · z(psi)              # soft, configurable
+               − 0.5 · 1[missing_rate > 0.5]
+               − window_penalty(window, group)
+               + probing_weight · z(gain_rank_pct)        # when probing enabled
 
 Auto-keep rule (the feature passes into v1_auto.txt):
     family_kept AND group_kept
     AND (cluster_id is singleton OR is cluster's max-rank member)
-    AND psi < psi_cutoff
+    AND (psi_mode != 'hard' OR psi < psi_cutoff)
     AND missing_rate < missing_rate_max_for_window
     AND iv >= iv_min
+
+PSI role is deliberately **soft by default** (psi_mode='soft'):
+  - 'hard': psi >= psi_cutoff drops the feature outright. Legacy behavior.
+  - 'soft' (default): high-PSI only penalizes rank_score; features stay in
+    the pool. Tree models often extract conditional signal from drifted
+    features (rank relations can survive mean shifts).
+  - 'off': PSI is informational only, no effect on selection.
 
 missing_rate_max_for_window: short-window features (7d/30d) get 0.98 cap
 instead of the global 0.95, since "business didn't happen" ≠ "data quality".
@@ -55,8 +67,12 @@ def _zscore(s):
 
 
 def _build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic_df,
-                         cluster_map, cfg):
-    """Merge all per-feature tables on 'feature' into one."""
+                         cluster_map, cfg, probing_df=None):
+    """Merge all per-feature tables on 'feature' into one.
+
+    probing_df: optional DataFrame with columns (feature, gain, weight, cover,
+    gain_rank_pct, ...) from Stage-1 probing model. Left-joined when present.
+    """
     df = iv_df.merge(psi_df, on="feature", how="outer")
     df = df.merge(lift_df, on="feature", how="outer")
     df = df.merge(missing_df, on="feature", how="outer")
@@ -65,17 +81,48 @@ def _build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic
                   on="feature", how="left")
     df["corr_cluster"] = df["feature"].map(cluster_map).fillna(-1).astype(int)
 
-    df = df.fillna({
+    fillna_map = {
         "iv": 0.0, "psi": 0.0, "lift_at_k": 1.0, "gini": 0.0,
         "missing_rate": 0.0, "n_unique": 0,
-    })
+    }
+
+    if probing_df is not None and len(probing_df):
+        keep = [c for c in ("feature", "gain", "weight", "cover",
+                            "gain_rank_pct", "weight_rank_pct", "cover_rank_pct")
+                if c in probing_df.columns]
+        pr = probing_df[keep].rename(columns={
+            "gain": "probe_gain", "weight": "probe_weight", "cover": "probe_cover"})
+        df = df.merge(pr, on="feature", how="left")
+        for c in ("probe_gain", "probe_weight", "probe_cover",
+                  "gain_rank_pct", "weight_rank_pct", "cover_rank_pct"):
+            if c in df.columns:
+                fillna_map[c] = 0.0
+
+    df = df.fillna(fillna_map)
     return df
+
+
+def _resolve_psi_knobs(cfg):
+    """Pull psi_mode / psi_penalty_weight with sane fallbacks.
+
+    psi_mode ∈ {"soft", "hard", "off"}. Historically PSI was a hard filter
+    (implicit 'hard'). We default to 'soft' now — high PSI only dampens
+    rank_score, it does not drop the feature. Products that really want the
+    old behavior can set analysis.psi_mode: hard.
+    """
+    ana = cfg.get("analysis", {}) or {}
+    mode = str(ana.get("psi_mode", "soft")).lower()
+    if mode not in ("soft", "hard", "off"):
+        mode = "soft"
+    weight = float(ana.get("psi_penalty_weight", 0.25))
+    return mode, weight
 
 
 def _apply_hard_filters(df, cfg):
     miss_max = float(cfg["analysis"]["missing_rate_max"])
     iv_min = float(cfg["analysis"]["iv_min"])
     psi_cutoff = float(cfg["analysis"]["psi_cutoff"])
+    psi_mode, _ = _resolve_psi_knobs(cfg)
 
     reasons = []
     for _, row in df.iterrows():
@@ -89,12 +136,15 @@ def _apply_hard_filters(df, cfg):
             drop.append("high_missing")
         if row["iv"] < iv_min:
             drop.append("low_iv")
-        if row["psi"] >= psi_cutoff:
+        if psi_mode == "hard" and row["psi"] >= psi_cutoff:
             drop.append("high_psi")
         reasons.append(";".join(drop))
     df = df.copy()
     df["_hard_drop"] = [bool(r) for r in reasons]
     df["_hard_drop_reason"] = reasons
+    # Informational flag: annotate high-PSI features even in soft/off mode
+    # so the report still shows drift risk without dropping the feature.
+    df["psi_over_cutoff"] = (df["psi"] >= psi_cutoff).astype(bool)
     return df
 
 
@@ -142,14 +192,38 @@ def _row_penalty_contribution(df, cfg):
 
 def _rank_and_auto_keep(df, cfg):
     df = df.copy()
+    psi_mode, psi_weight = _resolve_psi_knobs(cfg)
+    # PSI contribution to rank_score:
+    #   - 'off'     : zero weight — PSI is informational only
+    #   - 'soft'    : configurable weight (default 0.25 — meaningfully
+    #                 smaller than z(iv) / z(lift_at_k) / z(gini) each at 1.0)
+    #   - 'hard'    : same as soft; features past the cutoff were already
+    #                 dropped in _apply_hard_filters
+    effective_psi_weight = 0.0 if psi_mode == "off" else psi_weight
     df["rank_score"] = (
         _zscore(df["iv"])
         + _zscore(df["lift_at_k"])
         + _zscore(df["gini"])
-        - 1.0 * _zscore(df["psi"])
+        - effective_psi_weight * _zscore(df["psi"])
         - 0.5 * (df["missing_rate"] > 0.5).astype(float)
         - _row_penalty_contribution(df, cfg)
     )
+
+    # Probing model contribution: add when Stage 1 probing wrote gain_rank_pct.
+    # Weight is config-driven (analysis.probing.weight_in_rank_score, default 0.25).
+    probing_cfg = (cfg.get("analysis") or {}).get("probing") or {}
+    w_probe = float(probing_cfg.get("weight_in_rank_score", 0.25))
+    if "gain_rank_pct" in df.columns and w_probe > 0:
+        # gain_rank_pct is already in [0,1]; z-score makes it commensurate with
+        # the other z-scored terms.
+        df["rank_score"] = df["rank_score"] + w_probe * _zscore(df["gain_rank_pct"])
+        # Quadrant labels — expose what probing adds vs what IV already said.
+        iv_high = df["iv"].rank(pct=True) > 0.7
+        gain_high = df["gain_rank_pct"] > 0.7
+        df["discover"] = (~iv_high) & gain_high
+        df["stable"]   = iv_high & gain_high
+        df["interp"]   = iv_high & (~gain_high)
+        df["noise"]    = (~iv_high) & (~gain_high)
 
     # Within each correlation cluster, only the top-score survivor passes.
     cluster_winners = set()
@@ -195,12 +269,15 @@ def _apply_column_ordering(df, mapping):
         "family_base", "window", "pattern_id", "semantic_group",
         "dtype", "n_total", "n_unique", "missing_rate",
         "iv", "monotonic", "missing_n", "missing_woe",
-        "psi", "flag",
+        "psi", "flag", "psi_over_cutoff",
         "lift_at_k", "gini", "concentration",
+        "probe_gain", "probe_weight", "probe_cover",
+        "gain_rank_pct", "weight_rank_pct", "cover_rank_pct",
         "corr_cluster",
         "family_size", "in_family_rank", "family_kept",
         "group_size", "in_group_rank", "group_kept",
-        "rank_score", "auto_keep", "drop_reason",
+        "rank_score", "discover", "stable", "interp", "noise",
+        "auto_keep", "drop_reason",
     ]
     cols_present = [c for c in preferred if c in df.columns]
     rest = [c for c in df.columns if c not in cols_present]
@@ -217,6 +294,7 @@ def _write_index_html(report_dir_path, mapping):
     csvs = sorted([p.name for p in report_dir_path.glob("*.csv")])
     summary_first = ["summary.csv", "families.csv",
                      "family_derivation_candidates.csv", "semantic_groups.csv",
+                     "probing_importance.csv",
                      "iv_woe.csv", "psi.csv", "lift.csv", "missing.csv",
                      "correlation_edges.csv"]
     ordered = [n for n in summary_first if n in csvs]
@@ -308,6 +386,26 @@ def _write_auto_features_txt(df, out_path, top_n, report_hash, parent=None):
     return out_path
 
 
+def _load_probing_importance(cfg):
+    """Return the probing importance DataFrame, or None if not present.
+
+    The probing step writes probing_importance.csv into the report directory
+    before run_stage1 touches selector output. We read it lazily so Stage 1
+    still runs end-to-end when probing is disabled.
+    """
+    rdir = report_dir(cfg)
+    p = rdir / "probing_importance.csv"
+    if not p.is_file():
+        return None
+    try:
+        df = pd.read_csv(p)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Failed to read %s: %s; ignoring probing signal.", p, e)
+        return None
+    logger.info("Loaded probing importance: %s (%d rows)", p, len(df))
+    return df
+
+
 def _report_hash(summary_csv_path):
     h = hashlib.sha1()
     with open(summary_csv_path, "rb") as f:
@@ -389,9 +487,14 @@ def run_stage1(cfg):
     family_df = parse_families(features, cfg)
     semantic_df, missing_by_group = parse_semantic_groups(features, cfg)
 
+    # Probing importance — Stage-1 probing model writes this sidecar; pick
+    # it up if it exists so rank_score can incorporate the gain-based signal.
+    probing_df = _load_probing_importance(cfg)
+
     # Merge into a report base; rank within family/group; cluster
     base = _build_ranked_report(iv_df, psi_df, lift_df, miss_df,
-                                family_df, semantic_df, cluster_map={}, cfg=cfg)
+                                family_df, semantic_df, cluster_map={}, cfg=cfg,
+                                probing_df=probing_df)
     base = rank_within_family(base, cfg)
     base = rank_within_semantic_group(base, cfg)
 
