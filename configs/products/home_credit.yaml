@@ -66,6 +66,12 @@ analysis_overrides:
   iv_min: 0.005              # lower bar — HC features are weaker than UCI's duration
   corr_cutoff: 0.95
   per_feature_plot_top_n: 30 # keep plot generation bounded
+  # HC features are ~85% zero/NaN. Equal-frequency quantiles on such features
+  # produce one huge zero bin and many tiny non-zero bins whose IV/PSI become
+  # noise-dominated. Tree-based binning (DecisionTreeClassifier leaves) learns
+  # the informative splits directly and has min_samples_leaf baked in, so the
+  # dominant "is_zero vs nonzero" break is picked up automatically.
+  binning: tree
   # HC is sparse (~85% NaN/0), so univariate IV under-estimates features whose
   # signal lives in interactions (ratios, windowed deltas). Enable probing:
   # a cheap XGBoost on the CSR cache surfaces gain-based importance that

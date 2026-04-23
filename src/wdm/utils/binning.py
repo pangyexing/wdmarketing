@@ -10,7 +10,39 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def equal_freq_edges(values, n_bins=10, min_unique_per_bin=2):
+def _merge_small_bins(edges, values, min_samples):
+    """Merge adjacent bins until every bin holds ≥ min_samples (or only 1 bin
+    remains). Each iteration finds the smallest bin and drops the edge between
+    it and its smaller neighbor — this preserves larger, more stable bins.
+
+    Critical for sparse features: equal-frequency quantiles on a 90%-zero
+    column produce a huge zero bin and a handful of tiny non-zero bins whose
+    IV contribution is pure noise (log(p/n) on <50 samples).
+    """
+    if edges.size < 3:
+        return edges
+    values = np.asarray(values, dtype=np.float64)
+    while edges.size >= 3:
+        bins = np.digitize(values, edges[1:-1], right=False)
+        counts = np.bincount(bins, minlength=edges.size - 1)
+        if (counts >= min_samples).all():
+            break
+        smallest = int(np.argmin(counts))
+        if smallest == 0:
+            drop = 1
+        elif smallest == counts.size - 1:
+            drop = edges.size - 2
+        else:
+            # Merge with the neighbor that has fewer samples, so the resulting
+            # bin stays as balanced as possible with the rest.
+            left = counts[smallest - 1]
+            right = counts[smallest + 1]
+            drop = smallest if left <= right else smallest + 1
+        edges = np.concatenate([edges[:drop], edges[drop + 1:]])
+    return edges
+
+
+def equal_freq_edges(values, n_bins=10, min_samples_per_bin=None):
     """Compute equal-frequency (quantile) edges from non-NaN values.
 
     Returns: np.ndarray of edges with len = n_effective_bins + 1.
@@ -19,10 +51,17 @@ def equal_freq_edges(values, n_bins=10, min_unique_per_bin=2):
     categoricals like poutcome=0/1/2/3), use each unique value as its own bin.
     This prevents categorical features from collapsing to 1 bin under naive
     quantile binning when one category dominates.
+
+    min_samples_per_bin: int or None
+        Minimum samples per bin; adjacent bins under this threshold are merged
+        into neighbors so small bins cannot inflate downstream IV/PSI/lift with
+        noise. None → auto = max(50, int(0.01 * N_non_nan)). Pass 0 or 1 to
+        disable merging (preserves pre-2026-04 behavior).
     """
     values = np.asarray(values, dtype=np.float64)
     values = values[~np.isnan(values)]
-    if values.size == 0:
+    n = values.size
+    if n == 0:
         return np.array([], dtype=np.float64)
     uniques = np.unique(values)
     if uniques.size == 1:
@@ -35,14 +74,18 @@ def equal_freq_edges(values, n_bins=10, min_unique_per_bin=2):
         mids = (uniques[:-1] + uniques[1:]) / 2.0
         edges = np.concatenate([[uniques[0]], mids, [uniques[-1]]])
         edges[-1] = np.nextafter(edges[-1], np.inf)
-        return edges.astype(np.float64)
+    else:
+        qs = np.linspace(0.0, 1.0, n_bins + 1)
+        edges = np.quantile(values, qs, interpolation="linear")
+        edges = np.unique(edges)
+        if edges.size < 2:
+            edges = np.array([values.min(), values.max() + 1e-12], dtype=np.float64)
+        edges[-1] = np.nextafter(edges[-1], np.inf)
 
-    qs = np.linspace(0.0, 1.0, n_bins + 1)
-    edges = np.quantile(values, qs, interpolation="linear")
-    edges = np.unique(edges)
-    if edges.size < 2:
-        edges = np.array([values.min(), values.max() + 1e-12], dtype=np.float64)
-    edges[-1] = np.nextafter(edges[-1], np.inf)
+    if min_samples_per_bin is None:
+        min_samples_per_bin = max(50, int(0.01 * n))
+    if min_samples_per_bin > 1 and edges.size >= 3:
+        edges = _merge_small_bins(edges, values, int(min_samples_per_bin))
     return edges.astype(np.float64)
 
 
