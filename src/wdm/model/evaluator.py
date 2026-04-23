@@ -67,13 +67,26 @@ def evaluate_all(booster, data, cfg):
         _metrics_for_split("valid", data.y_valid, s_va, top_k_pct),
         _metrics_for_split("oot",   data.y_oot,   s_oot, top_k_pct),
     ]
-    metrics_df = pd.DataFrame(rows)
-
     binned = {
         "train": compute_binned_lift(data.y_train, s_tr, n_bins=10),
         "valid": compute_binned_lift(data.y_valid, s_va, n_bins=10),
         "oot":   compute_binned_lift(data.y_oot,   s_oot, n_bins=10),
     }
+
+    # Companion metric on the non-all-NA OOT subset: "oot" is the
+    # production-equivalent view, "oot_excl_all_na" strips out rows with zero
+    # signal so the number is comparable to train/valid. Both are reported so
+    # users can read the gap as a data-quality signal.
+    oot_all_na_mask = getattr(data, "oot_all_na_mask", None)
+    if oot_all_na_mask is not None and oot_all_na_mask.size == len(data.y_oot) \
+            and oot_all_na_mask.any() and (~oot_all_na_mask).any():
+        keep = ~oot_all_na_mask
+        rows.append(_metrics_for_split(
+            "oot_excl_all_na", data.y_oot[keep], s_oot[keep], top_k_pct))
+        binned["oot_excl_all_na"] = compute_binned_lift(
+            data.y_oot[keep], s_oot[keep], n_bins=10)
+
+    metrics_df = pd.DataFrame(rows)
 
     # Feature importance
     gain = booster.get_score(importance_type="gain")
