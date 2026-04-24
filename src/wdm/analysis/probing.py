@@ -20,6 +20,7 @@ Design choices:
 """
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -183,7 +184,12 @@ def run_probing(cfg, cache_dir, out_dir):
     Returns a dict with paths and summary stats.
     """
     import xgboost as xgb
-    from scripts.build_sparse_cache import load_cache  # reuse loader
+    # scripts/ isn't a package on sys.path when run_analysis.py is launched
+    # directly, so import build_sparse_cache by adding its directory.
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from build_sparse_cache import load_cache  # reuse loader
 
     cache_dir = Path(cache_dir)
     out_dir = Path(out_dir)

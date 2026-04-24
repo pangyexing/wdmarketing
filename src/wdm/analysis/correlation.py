@@ -97,7 +97,9 @@ def compute_correlation_edges(features,
     sum_sq = np.zeros(len(features), dtype=np.float64)
     total_rows = None
 
-    for df_chunk, block in iter_column_chunks(path, features, always=always, chunk_size=chunk_size):
+    for df_chunk, block in iter_column_chunks(
+            path, features, always=always, chunk_size=chunk_size,
+            desc="[corr pass 1 means]"):
         n_rows = len(df_chunk)
         if total_rows is None:
             total_rows = n_rows
@@ -122,6 +124,10 @@ def compute_correlation_edges(features,
     # ---- Pass 2: block-pair covariance ----
     n_chunks = (len(features) + chunk_size - 1) // chunk_size
     blocks = [features[i * chunk_size:(i + 1) * chunk_size] for i in range(n_chunks)]
+    n_block_pairs = n_chunks * (n_chunks + 1) // 2
+    logger.info("[corr pass 2 cov] %d blocks → %d block-pairs to scan",
+                n_chunks, n_block_pairs)
+    pair_counter = 0
 
     edges = []
     for bi in range(n_chunks):
@@ -135,6 +141,8 @@ def compute_correlation_edges(features,
         # Single-chunk read for efficiency; reuse pd.read_csv
         dfA = pd.read_csv(path, usecols=always_set)
         dfA = dfA[always_set]  # ensure order
+        logger.info("[corr pass 2 cov] block %d/%d loaded (%d features); pairing with %d remaining blocks",
+                    bi + 1, n_chunks, len(blockA), n_chunks - bi)
         # Build nan-aware matrix for blockA
         A = np.empty((len(dfA), len(blockA)), dtype=np.float64)
         for j, feat in enumerate(blockA):
@@ -163,6 +171,10 @@ def compute_correlation_edges(features,
             denom = np.outer(stdA, stdB)
             with np.errstate(invalid="ignore", divide="ignore"):
                 r = np.where(denom > 0, cov / denom, 0.0)
+            pair_counter += 1
+            if pair_counter % 25 == 0 or pair_counter == n_block_pairs:
+                logger.info("[corr pass 2 cov] %d/%d block-pairs done",
+                            pair_counter, n_block_pairs)
 
             # Collect edges
             for i in range(r.shape[0]):

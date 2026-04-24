@@ -59,7 +59,7 @@ feature_groups:
     - {name: cc,      description: 信用卡余额历史,                     feature_prefix: "cc_",     max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
 
 selected_features:
-  active_version: v1_auto
+  active_version: v2_manual_noleak
   versions_dir: artifacts/home_credit/selected_features
 
 analysis_overrides:

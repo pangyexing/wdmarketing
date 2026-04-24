@@ -25,7 +25,8 @@ def iter_column_chunks(path,
                        features,
                        always=None,
                        chunk_size=50,
-                       dtype=None):
+                       dtype=None,
+                       desc=None):
     """Yield DataFrames containing always-cols + chunk_size feature cols.
 
     Args:
@@ -34,6 +35,9 @@ def iter_column_chunks(path,
         always: list of columns always read (label, time, treatment, ids).
         chunk_size: how many feature cols per chunk.
         dtype: optional dtype dict passed to pd.read_csv.
+        desc: optional label; when provided, per-chunk progress is emitted
+            at INFO so a long Stage-1 pass shows a heartbeat instead of
+            going silent between start/end.
     """
     path = Path(path)
     if not path.is_file():
@@ -41,6 +45,8 @@ def iter_column_chunks(path,
     always = list(always or [])
     features = list(features)
     n_chunks = (len(features) + chunk_size - 1) // chunk_size
+    log_fn = logger.info if desc else logger.debug
+    prefix = "{0} ".format(desc) if desc else ""
     for i in range(n_chunks):
         block = features[i * chunk_size:(i + 1) * chunk_size]
         cols = always + block
@@ -50,8 +56,8 @@ def iter_column_chunks(path,
         df = pd.read_csv(path, usecols=cols, dtype=dtype)
         # reorder so always comes first then block (pd.read_csv preserves CSV order)
         df = df[cols]
-        logger.debug("chunk %d/%d: %d features, %d rows", i + 1, n_chunks,
-                     len(block), len(df))
+        log_fn("%schunk %d/%d: %d features, %d rows", prefix, i + 1, n_chunks,
+               len(block), len(df))
         yield df, block
 
 

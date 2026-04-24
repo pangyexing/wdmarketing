@@ -29,6 +29,7 @@ import datetime
 import hashlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -466,22 +467,40 @@ def run_stage1(cfg):
     full_df = pd.read_csv(path)
     y = full_df[label_col]
 
-    logger.info("Stage 1 starting: %d features × %d rows", len(features), len(full_df))
+    n_chunks = (len(features) + chunk_size - 1) // chunk_size
+    logger.info("Stage 1 starting: %d features × %d rows (chunk_size=%d → %d chunks/pass)",
+                len(features), len(full_df), chunk_size, n_chunks)
+
+    def _step(idx, label):
+        logger.info("Stage 1 [%d/5] %s: starting", idx, label)
+        return time.monotonic()
+
+    def _done(idx, label, t0):
+        logger.info("Stage 1 [%d/5] %s: done in %.1fs", idx, label, time.monotonic() - t0)
 
     # IV / WOE
+    t0 = _step(1, "IV/WOE")
     iv_df, bin_specs = compute_iv_table(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
+        iter_column_chunks(path, features, always=[label_col],
+                           chunk_size=chunk_size, desc="[1/5 IV/WOE]"),
         spec_map, y, features, cfg, get_spec)
+    _done(1, "IV/WOE", t0)
 
     # Missing
+    t0 = _step(2, "Missing")
     miss_df = compute_missing_stats(
-        iter_column_chunks(path, features, always=[], chunk_size=chunk_size),
+        iter_column_chunks(path, features, always=[],
+                           chunk_size=chunk_size, desc="[2/5 Missing]"),
         spec_map, get_spec)
+    _done(2, "Missing", t0)
 
     # Lift
+    t0 = _step(3, "Lift")
     lift_df = compute_feature_lift_table(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
+        iter_column_chunks(path, features, always=[label_col],
+                           chunk_size=chunk_size, desc="[3/5 Lift]"),
         spec_map, y, cfg, get_spec)
+    _done(3, "Lift", t0)
 
     # PSI — split by time if possible else random halves as placeholder
     if time_col and time_col in full_df.columns:
@@ -492,16 +511,21 @@ def run_stage1(cfg):
         m_e, m_a = (r < 0.5), (r >= 0.5)
         logger.warning("No time_column configured — PSI computed on random halves "
                        "(useful only as a smoke check).")
+    t0 = _step(4, "PSI")
     psi_df = compute_psi_table_single_source(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
+        iter_column_chunks(path, features, always=[label_col],
+                           chunk_size=chunk_size, desc="[4/5 PSI]"),
         m_e, m_a, spec_map, cfg, get_spec)
+    _done(4, "PSI", t0)
 
     # Correlation (global cutoff)
     corr_threshold = float(cfg["analysis"]["corr_cutoff"])
+    t0 = _step(5, "Correlation")
     edges = compute_correlation_edges(
         features, path, always=[label_col],
         spec_map=spec_map, get_spec_fn=get_spec,
         chunk_size=chunk_size, threshold=corr_threshold)
+    _done(5, "Correlation", t0)
     if edges.empty:
         logger.info("No feature pairs with |r| >= %.2f — correlation_edges.csv will "
                     "be empty (this is expected when no features are highly "
