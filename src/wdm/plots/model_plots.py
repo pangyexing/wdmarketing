@@ -135,8 +135,8 @@ def plot_shap_summary(booster, X_sample, feature_names, out_dir, mapping=None, m
     _ensure(out_dir)
     try:
         import shap
-    except ImportError:
-        logger.warning("shap not installed — skipping SHAP summary")
+    except Exception as e:
+        logger.warning("shap import failed (%s) — skipping SHAP summary", e)
         return
     try:
         explainer = shap.TreeExplainer(booster)
