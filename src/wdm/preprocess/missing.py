@@ -34,6 +34,18 @@ class MissingSpec:
     sentinels: List[Any] = dataclasses.field(default_factory=list)
     treat_negative_as_missing: bool = True
     treat_empty_as_missing: bool = True
+    # Two independent zero-as-missing knobs, gated by the caller's stage:
+    #   * analysis_treat_zero_as_missing: Stage-1 (IV/PSI/Lift/missing_rate/
+    #     correlation) — fold exact zeros into the missing bucket alongside
+    #     NaN. Used to compute "no event in window" stats.
+    #   * training_treat_zero_as_missing: Stage-2 (fit_missing /
+    #     apply_missing_for_training) and the deploy-time predict.py replay
+    #     — fold exact zeros into the missing mask before applying
+    #     fill_strategy. With keep_nan, the model sees NaN where 0 used to
+    #     be; with constant/-999, both 0 and NaN become -999.
+    # Each stage honors its own flag, so the user can opt-in independently.
+    analysis_treat_zero_as_missing: bool = False
+    training_treat_zero_as_missing: bool = False
     fill_strategy: str = "constant"
     fill_constant: float = -999.0
     fill_value: Optional[float] = None            # only for 'special'
@@ -58,6 +70,10 @@ def build_missing_spec(cfg):
         sentinels=list(g.get("sentinels", [])),
         treat_negative_as_missing=bool(g.get("treat_negative_as_missing", True)),
         treat_empty_as_missing=bool(g.get("treat_empty_as_missing", True)),
+        analysis_treat_zero_as_missing=bool(
+            g.get("analysis_treat_zero_as_missing", False)),
+        training_treat_zero_as_missing=bool(
+            g.get("training_treat_zero_as_missing", False)),
         fill_strategy=str(g.get("fill_strategy", "constant")),
         fill_constant=float(g.get("fill_constant", -999.0)),
         fill_value=None,
@@ -86,7 +102,7 @@ def get_spec(spec_map, feature):
 
 # ---------- core: pre-fill NaN conversion used by ALL Stage-1 analysis ----------
 
-def to_nan_array(series, spec):
+def to_nan_array(series, spec, *, analysis=False):
     """Convert a pandas Series to (float64 numpy array with NaN for missing,
     boolean mask of 'is_missing').
 
@@ -95,8 +111,12 @@ def to_nan_array(series, spec):
       2. pandas.NA / numpy.nan already    (always handled — NaN is missing)
       3. values in spec.sentinels → NaN   (exact match)
       4. negative values → NaN            (if treat_negative_as_missing)
+      5. exact zeros → NaN                (gated per stage:
+         analysis=True  → spec.analysis_treat_zero_as_missing
+         analysis=False → spec.training_treat_zero_as_missing)
 
-    This function does NOT fill anything. Its output feeds PSI/IV/WOE/correlation.
+    This function does NOT fill anything. Its output feeds PSI/IV/WOE/correlation
+    when analysis=True; fit_missing / apply_missing_for_training when False.
     """
     s = pd.Series(series)
     # Coerce non-numeric (string) to float where possible; non-parseable → NaN
@@ -121,6 +141,14 @@ def to_nan_array(series, spec):
     if spec.treat_negative_as_missing:
         with np.errstate(invalid="ignore"):
             mask |= (arr < 0)
+
+    # Zeros — per-stage knob.
+    zero_active = (
+        spec.analysis_treat_zero_as_missing if analysis
+        else spec.training_treat_zero_as_missing)
+    if zero_active:
+        with np.errstate(invalid="ignore"):
+            mask |= (arr == 0.0)
 
     arr = arr.copy()
     arr[mask] = np.nan
@@ -249,7 +277,9 @@ def apply_missing_for_training(df, spec_map, fitted):
 
 # Bump when MissingSpec / FittedStats gain a field that predict.py must understand.
 # Older predict.py bundles read this key and refuse to run on a newer, unknown version.
-MISSING_SPEC_SCHEMA_VERSION = 1
+#   v2: introduced training_treat_zero_as_missing — predict.py must replay 0→NaN
+#       at deploy time when the spec sets this flag.
+MISSING_SPEC_SCHEMA_VERSION = 2
 
 
 def dump_missing_spec(path, spec_map, fitted):

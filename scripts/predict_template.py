@@ -27,7 +27,7 @@ import xgboost as xgb
 
 # Highest missing_spec.json schema version this predict.py can read. Keep in
 # sync with MISSING_SPEC_SCHEMA_VERSION in wdm/preprocess/missing.py.
-_SUPPORTED_SPEC_SCHEMA = 1
+_SUPPORTED_SPEC_SCHEMA = 2
 
 
 def _apply_missing_rules(df, spec_map, fitted):
@@ -63,7 +63,12 @@ def _apply_missing_rules(df, spec_map, fitted):
         if spec.get("treat_negative_as_missing", True):
             arr = np.where(arr < 0, np.nan, arr)
 
-        # 4. fill
+        # 4. zeros (deploy-time replays Stage-2's training flag only;
+        # the analysis flag is irrelevant at predict time)
+        if spec.get("training_treat_zero_as_missing", False):
+            arr = np.where(arr == 0.0, np.nan, arr)
+
+        # 5. fill
         if fs is None:
             strategy = spec.get("fill_strategy", "constant")
             fill = float(spec.get("fill_constant", -999.0))

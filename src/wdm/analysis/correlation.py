@@ -107,7 +107,7 @@ def compute_correlation_edges(features,
         cols = np.empty((n_rows, len(block)), dtype=np.float64)
         for j, feat in enumerate(block):
             spec = get_spec_fn(spec_map, feat)
-            arr, _ = to_nan_array(df_chunk[feat], spec)
+            arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
             cols[:, j] = arr
         c, s, s2 = _column_stats(cols)
         for j, feat in enumerate(block):
@@ -147,7 +147,7 @@ def compute_correlation_edges(features,
         A = np.empty((len(dfA), len(blockA)), dtype=np.float64)
         for j, feat in enumerate(blockA):
             spec = get_spec_fn(spec_map, feat)
-            arr, _ = to_nan_array(dfA[feat], spec)
+            arr, _ = to_nan_array(dfA[feat], spec, analysis=True)
             A[:, j] = arr
 
         for bj in range(bi, n_chunks):  # symmetric; include diagonal for within-block pairs
@@ -164,7 +164,7 @@ def compute_correlation_edges(features,
                 B = np.empty((len(dfB), len(blockB)), dtype=np.float64)
                 for j, feat in enumerate(blockB):
                     spec = get_spec_fn(spec_map, feat)
-                    arr, _ = to_nan_array(dfB[feat], spec)
+                    arr, _ = to_nan_array(dfB[feat], spec, analysis=True)
                     B[:, j] = arr
 
             cov, pairs = _pairwise_cov_block(A, B, muA, muB)

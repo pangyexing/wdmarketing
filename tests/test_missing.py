@@ -106,6 +106,110 @@ def test_load_missing_spec_rejects_future_schema(tmp_path):
         load_missing_spec(str(path))
 
 
+def test_analysis_zero_as_missing_only_affects_analysis_path():
+    # hzz_day-style spec: keep raw zeros for the model, but fold them into
+    # the missing bucket for Stage-1 stats.
+    spec = MissingSpec(sentinels=[], treat_negative_as_missing=False,
+                       analysis_treat_zero_as_missing=True,
+                       fill_strategy="keep_nan")
+    s = pd.Series([0.0, 1.5, np.nan, 0.0, 2.7])
+
+    arr_a, mask_a = to_nan_array(s, spec, analysis=True)
+    assert list(mask_a) == [True, False, True, True, False]
+    assert np.isnan(arr_a[0]) and np.isnan(arr_a[3])  # zeros masked
+
+    arr_t, mask_t = to_nan_array(s, spec)  # default analysis=False
+    assert list(mask_t) == [False, False, True, False, False]
+    assert arr_t[0] == 0.0 and arr_t[3] == 0.0  # zeros preserved
+
+    # End-to-end Stage-2: fit + apply must preserve the raw 0s.
+    df = pd.DataFrame({"x": s})
+    fitted = fit_missing(df, {"x": spec, "__default__": spec})
+    assert fitted["x"].n_missing_train == 1  # only the explicit NaN
+    out = apply_missing_for_training(df, {"x": spec, "__default__": spec}, fitted)
+    assert out["x"].iloc[0] == 0.0
+    assert out["x"].iloc[3] == 0.0
+
+
+def test_build_missing_spec_reads_analysis_zero_flag():
+    cfg = {"missing": {"global": {
+        "sentinels": [], "treat_negative_as_missing": False,
+        "treat_empty_as_missing": True,
+        "analysis_treat_zero_as_missing": True,
+        "fill_strategy": "keep_nan"}}}
+    spec_map = build_missing_spec(cfg)
+    assert spec_map["__default__"].analysis_treat_zero_as_missing is True
+    # Training flag stays at default False unless explicitly set
+    assert spec_map["__default__"].training_treat_zero_as_missing is False
+
+
+def test_training_zero_as_missing_only_affects_training_path():
+    # Mirror image of the analysis-only test: Stage-2 / predict folds zeros,
+    # Stage-1 leaves them alone.
+    spec = MissingSpec(sentinels=[], treat_negative_as_missing=False,
+                       analysis_treat_zero_as_missing=False,
+                       training_treat_zero_as_missing=True,
+                       fill_strategy="keep_nan")
+    s = pd.Series([0.0, 1.5, np.nan, 0.0, 2.7])
+
+    # Stage-1 (analysis=True): zero NOT folded → missing rate = 1/5
+    _, mask_a = to_nan_array(s, spec, analysis=True)
+    assert list(mask_a) == [False, False, True, False, False]
+
+    # Stage-2 default (analysis=False): zero IS folded → missing rate = 3/5
+    arr_t, mask_t = to_nan_array(s, spec)
+    assert list(mask_t) == [True, False, True, True, False]
+    assert np.isnan(arr_t[0]) and np.isnan(arr_t[3])
+
+    # End-to-end Stage-2: with keep_nan, the matrix has NaN where 0 was
+    df = pd.DataFrame({"x": s})
+    fitted = fit_missing(df, {"x": spec, "__default__": spec})
+    assert fitted["x"].n_missing_train == 3  # NaN + two zeros
+    out = apply_missing_for_training(df, {"x": spec, "__default__": spec}, fitted)
+    assert out["x"].isna().sum() == 3
+
+
+def test_both_zero_flags_independent():
+    # Both off → no zero folding anywhere
+    spec_off = MissingSpec(treat_negative_as_missing=False,
+                           fill_strategy="keep_nan")
+    s = pd.Series([0.0, 1.0, np.nan])
+    _, mask_a = to_nan_array(s, spec_off, analysis=True)
+    _, mask_t = to_nan_array(s, spec_off)
+    assert list(mask_a) == [False, False, True]
+    assert list(mask_t) == [False, False, True]
+
+    # Both on → zero folded in both stages
+    spec_both = MissingSpec(treat_negative_as_missing=False,
+                            analysis_treat_zero_as_missing=True,
+                            training_treat_zero_as_missing=True,
+                            fill_strategy="keep_nan")
+    _, mask_a2 = to_nan_array(s, spec_both, analysis=True)
+    _, mask_t2 = to_nan_array(s, spec_both)
+    assert list(mask_a2) == [True, False, True]
+    assert list(mask_t2) == [True, False, True]
+
+
+def test_missing_spec_schema_v2_round_trip(tmp_path):
+    # New flag persists through dump/load round-trip
+    spec = MissingSpec(treat_negative_as_missing=False,
+                       analysis_treat_zero_as_missing=True,
+                       training_treat_zero_as_missing=True,
+                       fill_strategy="keep_nan")
+    df = pd.DataFrame({"x": [0.0, 1.0, 2.0]})
+    fitted = fit_missing(df, {"x": spec, "__default__": spec})
+    path = tmp_path / "missing_spec.json"
+    dump_missing_spec(str(path), {"x": spec, "__default__": spec}, fitted)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == MISSING_SPEC_SCHEMA_VERSION
+    assert payload["specs"]["x"]["training_treat_zero_as_missing"] is True
+
+    loaded_specs, _ = load_missing_spec(str(path))
+    assert loaded_specs["x"].training_treat_zero_as_missing is True
+    assert loaded_specs["x"].analysis_treat_zero_as_missing is True
+
+
 def test_load_missing_spec_accepts_legacy_unversioned(tmp_path):
     # Bundles written before schema_version existed default to 0 and should
     # still load — we only refuse versions strictly newer than we support.

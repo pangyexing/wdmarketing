@@ -92,8 +92,8 @@ def compute_psi_table(chunk_iter_train, chunk_iter_oot, spec_map, feature_names,
         for feat in block_tr:
             spec = get_spec_fn(spec_map, feat)
             from wdm.preprocess.missing import to_nan_array
-            arr_tr, _ = to_nan_array(df_tr[feat], spec)
-            arr_oot, _ = to_nan_array(df_oot[feat], spec)
+            arr_tr, _ = to_nan_array(df_tr[feat], spec, analysis=True)
+            arr_oot, _ = to_nan_array(df_oot[feat], spec, analysis=True)
             edges = equal_freq_edges(arr_tr, n_bins=n_bins_cfg)
             psi = compute_psi(arr_tr, arr_oot, edges=edges, n_bins=n_bins_cfg,
                               missing_as_bin=True)
@@ -120,7 +120,7 @@ def compute_psi_table_single_source(chunk_iter, mask_expected, mask_actual,
         for feat in block:
             spec = get_spec_fn(spec_map, feat)
             from wdm.preprocess.missing import to_nan_array
-            full, _ = to_nan_array(df_chunk[feat], spec)
+            full, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
             arr_e = full[m_e]
             arr_a = full[m_a]
             edges = equal_freq_edges(arr_e, n_bins=n_bins_cfg)

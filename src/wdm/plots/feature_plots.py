@@ -214,7 +214,7 @@ def run_per_feature_plots(cfg, bin_specs):
     for _, row in top.iterrows():
         feat = row["feature"]
         spec = get_spec(spec_map, feat)
-        arr, mask = to_nan_array(raw[feat], spec)
+        arr, mask = to_nan_array(raw[feat], spec, analysis=True)
         outdir = per_feature_dir(cfg, feat)
         ensure_dirs(outdir)
         # dist

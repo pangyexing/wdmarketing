@@ -21,7 +21,7 @@ def compute_missing_stats(chunk_iter, spec_map, get_spec_fn):
             spec = get_spec_fn(spec_map, feat)
             raw = df_chunk[feat]
             from wdm.preprocess.missing import to_nan_array
-            arr, mask = to_nan_array(raw, spec)
+            arr, mask = to_nan_array(raw, spec, analysis=True)
             non_nan = arr[~np.isnan(arr)]
             rows.append({
                 "feature": feat,

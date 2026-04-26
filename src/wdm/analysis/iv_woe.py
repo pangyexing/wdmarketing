@@ -146,7 +146,7 @@ def compute_iv_table(chunk_iter, spec_map, y_series, feature_names,
             seen.add(feat)
             spec = get_spec_fn(spec_map, feat)
             from wdm.preprocess.missing import to_nan_array
-            arr, _ = to_nan_array(df_chunk[feat], spec)
+            arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
             bs = woe_bin(arr, y, feat,
                          n_bins=n_bins_cfg, strategy=strategy,
                          missing_as_bin=bool(spec.treat_as_missing_in_woe) or True)

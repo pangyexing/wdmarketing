@@ -93,7 +93,7 @@ def compute_feature_lift_table(chunk_iter, spec_map, y_series, cfg, get_spec_fn)
         for feat in block:
             spec = get_spec_fn(spec_map, feat)
             from wdm.preprocess.missing import to_nan_array
-            arr, _ = to_nan_array(df_chunk[feat], spec)
+            arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
             edges = equal_freq_edges(arr, n_bins=n_bins_cfg)
             if edges.size < 2:
                 rows.append({"feature": feat, "lift_at_k": 1.0, "gini": 0.0,
