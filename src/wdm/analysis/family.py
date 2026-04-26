@@ -203,9 +203,11 @@ def parse_semantic_groups(features, cfg):
     """Return DataFrame[feature, semantic_group, group_prefer, group_max_keep, group_corr_cutoff]
 
     A group can declare its members via:
-      - `features: [list, of, names]`  — explicit list, or
-      - `feature_prefix: "bureau_"`    — match all features whose name starts with it
-    If both are set, `features` is treated as an additive explicit list on top of the prefix match.
+      - `features: [list, of, names]`     — explicit list, or
+      - `feature_prefix: "bureau_"`       — single prefix match, or
+      - `feature_prefix: ["3m_", "6m_"]`  — any-of-list prefix match
+    If both `features` and `feature_prefix` are set, `features` is treated as an
+    additive explicit list on top of the prefix match.
     Unmatched features get semantic_group=None.
     """
     groups = (cfg.get("feature_groups") or {}).get("semantic_groups") or []
@@ -218,9 +220,13 @@ def parse_semantic_groups(features, cfg):
         name = g["name"]
         declared = list(g.get("features", []) or [])
         prefix = g.get("feature_prefix")
-        matched = []
-        if prefix:
-            matched = [f for f in features if f.startswith(prefix)]
+        if isinstance(prefix, str):
+            prefixes = [prefix]
+        elif isinstance(prefix, (list, tuple)):
+            prefixes = [p for p in prefix if isinstance(p, str) and p]
+        else:
+            prefixes = []
+        matched = [f for f in features if any(f.startswith(p) for p in prefixes)] if prefixes else []
         explicit_matched = [f for f in declared if f in feat_set]
         group_members = list(dict.fromkeys(matched + explicit_matched))
         missing_by_group[name] = [f for f in declared if f not in feat_set]

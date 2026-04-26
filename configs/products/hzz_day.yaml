@@ -1,0 +1,204 @@
+name: hzz_day
+
+data:
+  # train_path / oot_path / id_columns still TBD — fill once data is landed.
+  train_path: data/hzz_day.csv
+  oot_path: null
+  time_column: cd_time
+  time_format: yyyymmdd             # confirm format matches cd_time values
+  label_column: label_register
+  id_columns: []                    # TBD
+  treatment_column: null
+  # column_mapping needs columns `feature,feature_cn` (src/wdm/utils/paths.py:73).
+  # data/sample_feat_names.csv has header `name,description`; the cleaned copy
+  # at data/sample_feat_names_clean.csv just renames the header and is safe
+  # to point at directly. column_mapping is informational only — when null,
+  # paths.py:85-96 falls back to identity mapping (feature_cn == feature) and
+  # Stage-1 selection is unaffected; the only loss is Chinese names in reports.
+  column_mapping: data/sample_feat_names_clean.csv
+
+missing:
+  # Aggregated count/amount features have legitimate zeros (no events in
+  # window) and genuinely-missing NaNs. The default "0/negative/empty =
+  # missing + fill -999" would corrupt both. Let XGBoost handle NaN natively.
+  global:
+    sentinels: []
+    treat_negative_as_missing: false
+    treat_empty_as_missing: true
+    fill_strategy: keep_nan
+    analysis_use_mask: true
+    generate_missing_indicator: false
+    indicator_threshold: 0.10
+    fill_value_sanity_check: true
+
+feature_groups:
+  # Pattern order: more-specific first (long forms before short; digits-
+  # only last). The multi-pattern resolver stops at first match, so a
+  # feature ending in `_1month` matches suffix_months_long BEFORE it can
+  # be mis-matched by suffix_months_short or suffix_digits_days.
+  window_patterns:
+    # --- fx_<digits>_<base> (embedded window) ---
+    - id: fx_embedded_days
+      pattern: '^fx_(?P<window>\d+)_(?P<base>.+)$'
+      alias_rule: '{window}d'
+
+    # --- SUFFIX: year (long then short) ---
+    - id: suffix_years_long
+      pattern: '^(?P<base>.+?)_(?P<window>\d+)years?$'
+      alias_rule: '{window}y'
+    - id: suffix_years_short
+      pattern: '^(?P<base>.+?)_(?P<window>\d+y)$'
+
+    # --- SUFFIX: month (long / mon / short m) ---
+    - id: suffix_months_long
+      pattern: '^(?P<base>.+?)_(?P<window>\d+)months?$'
+      alias_rule: '{window}m'
+    - id: suffix_mon
+      pattern: '^(?P<base>.+?)_(?P<window>\d+)mon$'
+      alias_rule: '{window}m'
+    - id: suffix_months_short
+      pattern: '^(?P<base>.+?)_(?P<window>\d+m)$'
+
+    # --- SUFFIX: day (long then short) ---
+    - id: suffix_days_long
+      pattern: '^(?P<base>.+?)_(?P<window>\d+)days?$'
+      alias_rule: '{window}d'
+    - id: suffix_days_short
+      pattern: '^(?P<base>.+?)_(?P<window>\d+d)$'
+
+    # --- SUFFIX: raw digits (jt_/bt_/jq_ convention — always days) ---
+    - id: suffix_digits_days
+      pattern: '^(?P<base>.+?)_(?P<window>\d+)$'
+      alias_rule: '{window}d'
+
+    # --- SUFFIX: _his → hist ---
+    - id: suffix_his
+      pattern: '^(?P<base>.+?)_(?P<window>his)$'
+      alias: {his: hist}
+
+    # --- PREFIX: year (long then short) ---
+    - id: prefix_years_long
+      pattern: '^(?P<window>\d+)years?_(?P<base>.+)$'
+      alias_rule: '{window}y'
+    - id: prefix_years_short
+      pattern: '^(?P<window>\d+y)_(?P<base>.+)$'
+
+    # --- PREFIX: month (long / mon / short m) ---
+    - id: prefix_months_long
+      pattern: '^(?P<window>\d+)months?_(?P<base>.+)$'
+      alias_rule: '{window}m'
+    - id: prefix_mon
+      pattern: '^(?P<window>\d+)mon_(?P<base>.+)$'
+      alias_rule: '{window}m'
+    - id: prefix_months_short
+      pattern: '^(?P<window>\d+m)_(?P<base>.+)$'
+
+    # --- PREFIX: day (long then short) ---
+    - id: prefix_days_long
+      pattern: '^(?P<window>\d+)days?_(?P<base>.+)$'
+      alias_rule: '{window}d'
+    - id: prefix_days_short
+      pattern: '^(?P<window>\d+d)_(?P<base>.+)$'
+
+  # Canonical keys, short → long. Mixed units are fine: window_rank is
+  # only compared within a family, and a family never mixes units.
+  window_order:
+    - 1d
+    - 3d
+    - 7d
+    - 14d
+    - 15d
+    - 30d
+    - 60d
+    - 90d
+    - 180d
+    - 270d
+    - 360d
+    - 365d
+    - 720d
+    - 730d
+    - 1m
+    - 2m
+    - 3m
+    - 6m
+    - 9m
+    - 12m
+    - 24m
+    - 1y
+    - 2y
+    - 3y
+    - 5y
+    - 10y
+    - all
+    - life
+    - hist
+
+  family_policy:
+    max_per_family: 2
+    prefer: best_iv_short_bias
+    window_penalty_gamma: 0.15
+    coverage_bias_iv_tolerance: 0.02
+    corr_cutoff_in_family: 0.90
+
+  semantic_groups:
+    # Long-dated by nature — disable short-bias so the long-window
+    # siblings (_360/_365/_his) are not penalised.
+    - {name: bt,  description: 消费贷 (installment loan), feature_prefix: "bt_",
+       max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90,
+       family_policy: {prefer: best_iv, window_penalty_gamma: 0.0}}
+    - {name: jq,  description: 贷超 (loan-supermarket), feature_prefix: "jq_",
+       max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90,
+       family_policy: {prefer: best_iv, window_penalty_gamma: 0.0}}
+    # Recency-relevant.
+    - {name: jt,  description: 现金贷 (cash loan), feature_prefix: "jt_",
+       max_keep: 100, prefer: best_iv, corr_cutoff_in_group: 0.90}
+    # fx is dense (78% of bases span >=3 windows in the sample) and semantically
+    # long-tail (historical inquiries). Override the global family_policy so the
+    # 360d/his siblings are not pruned by max_per_family=2 or short-window bias.
+    - {name: fx,  description: 风险查询 (external inquiry), feature_prefix: "fx_",
+       max_keep: 150, prefer: best_iv, corr_cutoff_in_group: 0.90,
+       family_policy: {prefer: best_iv, max_per_family: 3, window_penalty_gamma: 0.0}}
+    # bureau covers ~33% of the candidate pool (征信查询 features whose
+    # window appears as a prefix, not a suffix). One group, many prefixes —
+    # keeping it as a single group preserves cross-window family anchoring
+    # (see family.py:_family_anchor_group), so the family_policy override
+    # actually takes effect.
+    - {name: bureau, description: 征信查询 (PBOC/百行 inquiry, multi-window prefix),
+       feature_prefix: ["1m_", "3m_", "6m_", "9m_", "12m_", "24m_",
+                        "1d_", "3d_", "7d_", "14d_", "15d_", "30d_",
+                        "60d_", "90d_", "180d_", "270d_", "360d_", "365d_",
+                        "nbank_", "bank_",
+                        # cross-window ratio features (low/mid/high risk tier)
+                        "low_", "mid_", "high_"],
+       max_keep: 220, prefer: best_iv, corr_cutoff_in_group: 0.85,
+       family_policy: {prefer: best_iv, max_per_family: 3, window_penalty_gamma: 0.0}}
+
+selected_features:
+  active_version: v1_auto
+  versions_dir: artifacts/hzz_day/selected_features
+
+analysis_overrides:
+  iv_min: 0.005
+  corr_cutoff: 0.95
+  per_feature_plot_top_n: 30
+  # Sparse aggregated features → tree binning captures is_zero vs
+  # nonzero splits directly.
+  binning: tree
+  # Probing OFF until a sparse cache exists. To enable:
+  #   PYTHONPATH=src python3 scripts/build_sparse_cache.py --product hzz_day
+  # then flip enabled: true.
+  probing:
+    enabled: false
+    cache_dir: data/cache/hzz_day
+    weight_in_rank_score: 0.25
+    num_boost_round: 300
+    early_stopping_rounds: 30
+
+training_overrides:
+  top_k_pct: 0.10
+  final_feature_count: 200
+  hyperopt_max_evals: 2             # smoke value; bump to 20-50 for real runs
+  split:
+    strategy: time                  # use cd_time for chronological split
+    # strategy: stratified          # alternative: random stratified split (use when time_column is null or unreliable)
+    ratios: [0.70, 0.15, 0.15]
