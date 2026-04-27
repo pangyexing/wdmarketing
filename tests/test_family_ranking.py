@@ -6,10 +6,12 @@ Part A — `best_iv_short_bias` prefer mode and `window_penalty_gamma` bias
 away from long-window coverage advantage in `rank_score`.
 """
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from wdm.analysis.family import (
     _WINDOW_PATTERN_PRESETS,
@@ -138,6 +140,57 @@ def test_suffix_year_preset_recognizes_year_windows():
     out = parse_families(["bar_1y", "bar_2y", "bar_5y"], cfg)
     assert out["family_base"].unique().tolist() == ["bar"]
     assert sorted(out["window"].tolist()) == ["1y", "2y", "5y"]
+
+
+def test_hzz_day_window_aliases_collapse_units():
+    """Loaded hzz_day.yaml must canonicalize equivalent windows to one key:
+      * mon / m / month  → days  (3m == 3mon == 3months == 90d == 90)
+      * y / year         → days  (1y == 1year == 360d == 360)
+      * his / hist / all → hist  (life is intentionally distinct)
+      * plain digits     → days  (90 → 90d)
+    Same family_base + canonical window means same family — Stage-1 will
+    then dedupe them via the in-family correlation cutoff.
+    """
+    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "products" / "hzz_day.yaml"
+    product_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg = {"feature_groups": product_cfg["feature_groups"]}
+
+    cases = [
+        # (feature, expected_canonical_window)
+        ("foo_3m",       "90d"),
+        ("foo_3mon",     "90d"),
+        ("foo_3months",  "90d"),
+        ("foo_3month",   "90d"),
+        ("foo_90d",      "90d"),
+        ("foo_90",       "90d"),
+        ("bar_1y",       "360d"),
+        ("bar_1year",    "360d"),
+        ("bar_12m",      "360d"),
+        ("bar_12mon",    "360d"),
+        ("bar_360d",     "360d"),
+        ("bar_360",      "360d"),
+        ("baz_3y",       "1080d"),
+        ("baz_3years",   "1080d"),
+        ("baz_1080d",    "1080d"),
+        ("qux_his",      "hist"),
+        ("qux_hist",     "hist"),
+        ("qux_all",      "hist"),
+    ]
+    out = parse_families([f for f, _ in cases], cfg).set_index("feature")
+    for feature, expected_window in cases:
+        assert out.loc[feature, "window"] == expected_window, (
+            "{0}: expected window={1!r}, got {2!r}".format(
+                feature, expected_window, out.loc[feature, "window"]))
+
+    # Equivalent windows on the same base must produce one family.
+    foo_block = out.loc[[f for f, _ in cases if f.startswith("foo_")]]
+    assert foo_block["family_base"].nunique() == 1
+    assert foo_block["window"].nunique() == 1
+    assert foo_block["window_rank"].nunique() == 1
+
+    # `life` must remain a distinct canonical window (not folded into hist).
+    life_out = parse_families(["foo_life"], cfg).set_index("feature")
+    assert life_out.loc["foo_life", "window"] != "hist"
 
 
 def test_mixed_day_mon_year_to_days():

@@ -48,22 +48,32 @@ feature_groups:
       pattern: '^fx_(?P<window>\d+)_(?P<base>.+)$'
       alias_rule: '{window}d'
 
-    # --- SUFFIX: year (long then short) ---
+    # --- SUFFIX: year (long then short) — fold to days so 1y / 12m / 360d
+    #     all share one canonical key. Add new digits here when upstream
+    #     introduces them; unmatched digits fall through to {window}y and
+    #     trigger an "Unknown canonical windows" warning.
     - id: suffix_years_long
       pattern: '^(?P<base>.+?)_(?P<window>\d+)years?$'
+      alias: {"1": "360d", "2": "720d", "3": "1080d", "5": "1800d", "10": "3600d"}
       alias_rule: '{window}y'
     - id: suffix_years_short
       pattern: '^(?P<base>.+?)_(?P<window>\d+y)$'
+      alias: {"1y": "360d", "2y": "720d", "3y": "1080d", "5y": "1800d", "10y": "3600d"}
 
-    # --- SUFFIX: month (long / mon / short m) ---
+    # --- SUFFIX: month (long / mon / short m) — fold to days so 3m / 3mon
+    #     / 90d collapse into the same family. Same fallback behavior as
+    #     above for unmatched digits.
     - id: suffix_months_long
       pattern: '^(?P<base>.+?)_(?P<window>\d+)months?$'
+      alias: {"1": "30d", "2": "60d", "3": "90d", "6": "180d", "9": "270d", "12": "360d", "24": "720d"}
       alias_rule: '{window}m'
     - id: suffix_mon
       pattern: '^(?P<base>.+?)_(?P<window>\d+)mon$'
+      alias: {"1": "30d", "2": "60d", "3": "90d", "6": "180d", "9": "270d", "12": "360d", "24": "720d"}
       alias_rule: '{window}m'
     - id: suffix_months_short
       pattern: '^(?P<base>.+?)_(?P<window>\d+m)$'
+      alias: {"1m": "30d", "2m": "60d", "3m": "90d", "6m": "180d", "9m": "270d", "12m": "360d", "24m": "720d"}
 
     # --- SUFFIX: day (long then short) ---
     - id: suffix_days_long
@@ -77,27 +87,33 @@ feature_groups:
       pattern: '^(?P<base>.+?)_(?P<window>\d+)$'
       alias_rule: '{window}d'
 
-    # --- SUFFIX: _his → hist ---
-    - id: suffix_his
-      pattern: '^(?P<base>.+?)_(?P<window>his)$'
-      alias: {his: hist}
+    # --- SUFFIX: unbounded aggregates — fold his/all/hist to one canonical
+    #     key (`hist`). `life` (lifetime) is intentionally kept distinct.
+    - id: suffix_unbounded
+      pattern: '^(?P<base>.+?)_(?P<window>his|hist|all)$'
+      alias: {his: hist, all: hist, hist: hist}
 
-    # --- PREFIX: year (long then short) ---
+    # --- PREFIX: year (long then short) — fold to days, mirrors suffix_years_*.
     - id: prefix_years_long
       pattern: '^(?P<window>\d+)years?_(?P<base>.+)$'
+      alias: {"1": "360d", "2": "720d", "3": "1080d", "5": "1800d", "10": "3600d"}
       alias_rule: '{window}y'
     - id: prefix_years_short
       pattern: '^(?P<window>\d+y)_(?P<base>.+)$'
+      alias: {"1y": "360d", "2y": "720d", "3y": "1080d", "5y": "1800d", "10y": "3600d"}
 
-    # --- PREFIX: month (long / mon / short m) ---
+    # --- PREFIX: month (long / mon / short m) — fold to days, mirrors suffix_months_*.
     - id: prefix_months_long
       pattern: '^(?P<window>\d+)months?_(?P<base>.+)$'
+      alias: {"1": "30d", "2": "60d", "3": "90d", "6": "180d", "9": "270d", "12": "360d", "24": "720d"}
       alias_rule: '{window}m'
     - id: prefix_mon
       pattern: '^(?P<window>\d+)mon_(?P<base>.+)$'
+      alias: {"1": "30d", "2": "60d", "3": "90d", "6": "180d", "9": "270d", "12": "360d", "24": "720d"}
       alias_rule: '{window}m'
     - id: prefix_months_short
       pattern: '^(?P<window>\d+m)_(?P<base>.+)$'
+      alias: {"1m": "30d", "2m": "60d", "3m": "90d", "6m": "180d", "9m": "270d", "12m": "360d", "24m": "720d"}
 
     # --- PREFIX: day (long then short) ---
     - id: prefix_days_long
@@ -106,8 +122,10 @@ feature_groups:
     - id: prefix_days_short
       pattern: '^(?P<window>\d+d)_(?P<base>.+)$'
 
-  # Canonical keys, short → long. Mixed units are fine: window_rank is
-  # only compared within a family, and a family never mixes units.
+  # Canonical keys, short → long. All windows fold to days so that
+  # 3m / 3mon / 90d (and 1y / 12m / 360d, etc.) share one canonical
+  # key — the alias maps on the month/year patterns above do the folding.
+  # Add new day-counts here when upstream introduces them.
   window_order:
     - 1d
     - 3d
@@ -123,19 +141,9 @@ feature_groups:
     - 365d
     - 720d
     - 730d
-    - 1m
-    - 2m
-    - 3m
-    - 6m
-    - 9m
-    - 12m
-    - 24m
-    - 1y
-    - 2y
-    - 3y
-    - 5y
-    - 10y
-    - all
+    - 1080d
+    - 1800d
+    - 3600d
     - life
     - hist
 
