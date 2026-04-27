@@ -16,6 +16,7 @@ from wdm.model.evaluator import (
     evaluate_all, family_importance_audit, write_metrics_artifacts,
 )
 from wdm.model.exporter import export_bundle
+from wdm.model.feature_pruner import maybe_prune_to_final
 from wdm.model.trainer import train_final
 from wdm.model.tuner import run_hyperopt
 from wdm.plots.model_plots import make_all_model_plots
@@ -42,6 +43,11 @@ def main():
 
     # 1. Dataset
     data = build_dataset(cfg, version=version)
+
+    # 1b. Stage-2 candidate → final pruning. No-op when stage2_candidate_count
+    # is not set (or already ≤ final_feature_count); legacy callers see this
+    # as a pass-through.
+    data = maybe_prune_to_final(data, cfg, run_dir)
 
     # 2. Hyperopt
     trials_path = run_dir / "trials.pkl"

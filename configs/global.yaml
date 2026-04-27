@@ -112,6 +112,64 @@ analysis:
 training:
   top_k_pct: 0.10
   final_feature_count: 200
+  # Two-stage feature funnel. When stage2_candidate_count is set and exceeds
+  # final_feature_count, Stage-1 writes that many features into v1_auto.txt
+  # (the candidate pool) and Stage-2 trains a cheap exploratory XGBoost to
+  # re-rank by multivariate gain, then narrows to final_feature_count before
+  # hyperopt + final training. Leave null (or ≤ final_feature_count) to skip
+  # the funnel: Stage-1 emits final_feature_count and Stage-2 trains on it
+  # directly (legacy behaviour).
+  stage2_candidate_count: null
+  stage2_pruning:
+    # Ranking signal used to pick the final feature set. SHAP isn't an
+    # option on every target machine, so we provide three SHAP-free upgrades
+    # over single-seed gain. Trade-offs:
+    #   gain                  — single XGB; cheapest; biased toward
+    #                           high-cardinality / many-split features and
+    #                           sensitive to the random seed.
+    #   stability (default)   — n_seeds XGBs; mean rank-percentile of gain.
+    #                           Same signal as gain but absorbs XGB
+    #                           stochasticity (subsample/colsample). ~n_seeds×
+    #                           the cost of "gain"; usually the right default.
+    #   permutation           — single XGB; for each feature shuffle its
+    #                           valid column n_permutation_repeats times and
+    #                           average the PR-AUC drop. Closer to "does this
+    #                           column actually move predictions". Cost is
+    #                           ~n_features × n_permutation_repeats predict
+    #                           passes on X_valid.
+    #   permutation_stability — n_seeds × permutation. Most stable, slowest.
+    #   shap                  — single XGB; mean(|TreeSHAP|) over a sampled
+    #                           valid set. Usually the best signal *and*
+    #                           faster than permutation when SHAP installs
+    #                           cleanly. If SHAP import fails we fall back to
+    #                           shap_fallback (default "stability") with a
+    #                           warning. Set shap_fallback="raise" to fail
+    #                           loud on machines where SHAP must work.
+    #   shap_stability        — n_seeds × shap. Same fallback contract.
+    ranking_method: shap
+    n_seeds: 3                  # used by *_stability variants
+    n_permutation_repeats: 3    # used by permutation / permutation_stability
+    permutation_seed: 0
+    # null = score on the full valid set (best fidelity). SHAP memory scales
+    # ~n_samples × n_features × 8 bytes — set an explicit cap (e.g. 50000)
+    # when valid is huge or candidates exceed a few thousand to avoid OOM.
+    shap_sample_size: null
+    shap_fallback: stability    # used only if ranking_method is shap*; "raise" to disable fallback
+    # Defaults are deliberately cheap — this run exists only to rank, not
+    # to fit. Bump rounds if the ranking looks unstable across seeds.
+    num_boost_round: 200
+    early_stopping_rounds: 30
+    xgb_params:
+      objective: binary:logistic
+      tree_method: hist
+      eval_metric: aucpr
+      max_depth: 6
+      eta: 0.1
+      subsample: 0.8
+      colsample_bytree: 0.8
+      min_child_weight: 1.0
+      lambda: 1.0
+      verbosity: 0
   hyperopt_max_evals: 50
   cv_folds: 5
   random_seed: 42

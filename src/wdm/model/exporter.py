@@ -268,6 +268,12 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "n_features_indicator": len(data.indicator_features),
         "base_features": list(data.base_feature_list),
         "indicator_features": list(data.indicator_features),
+        "feature_funnel": {
+            "stage2_candidate_count": cfg["training"].get("stage2_candidate_count"),
+            "final_feature_count": cfg["training"]["final_feature_count"],
+            "ranking_method": (cfg["training"].get("stage2_pruning") or {}).get("ranking_method"),
+            "n_seeds": (cfg["training"].get("stage2_pruning") or {}).get("n_seeds"),
+        },
         "split_strategy": cfg["training"]["split"]["strategy"],
         "split_ratios": cfg["training"]["split"]["ratios"],
         "top_k_pct": cfg["training"]["top_k_pct"],

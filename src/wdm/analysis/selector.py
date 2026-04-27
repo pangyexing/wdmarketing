@@ -620,11 +620,17 @@ def run_stage1(cfg):
 
     _write_index_html(rdir, mapping)
 
-    # v1_auto.txt
+    # v1_auto.txt — when the two-stage funnel is enabled (stage2_candidate_count
+    # > final_feature_count), Stage-1 writes the wider candidate pool here and
+    # Stage-2 narrows it via exploratory XGB ranking. Otherwise this file is
+    # already the final feature set.
     sf_dir = selected_features_dir(cfg)
     ensure_dirs(sf_dir)
     auto_path = sf_dir / "v1_auto.txt"
-    top_n = int(cfg["training"]["final_feature_count"])
+    training_cfg = cfg["training"]
+    final_n = int(training_cfg["final_feature_count"])
+    candidate_n = training_cfg.get("stage2_candidate_count")
+    top_n = int(candidate_n) if candidate_n and int(candidate_n) > final_n else final_n
     rh = _report_hash(summary_path)
     _write_auto_features_txt(summary, auto_path, top_n=top_n, report_hash=rh)
 

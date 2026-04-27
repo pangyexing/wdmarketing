@@ -184,17 +184,27 @@ selected_features:
   versions_dir: artifacts/hzz_day/selected_features
 
 analysis_overrides:
-  iv_min: 0.005
+  # With analysis_treat_zero_as_missing=true the missing_rate column folds
+  # 0 ∪ NaN — it no longer measures data quality, so the global 0.95 cap
+  # would silently drop legitimate sparse features (e.g. a 4%-nonzero
+  # bt_*_180d). Lift to 0.99 so only "truly empty" columns get cut.
+  missing_rate_max: 0.99
+  # Univariate IV understates sparse features (see analysis_treat_zero_as_missing
+  # discussion above): the real bins land on the rare nonzero tail and the
+  # signal collapses to a single missing-bin WOE. Drop the floor — let
+  # rank_score + final_feature_count do the truncation instead.
+  iv_min: 0.001
   corr_cutoff: 0.95
   per_feature_plot_top_n: 30
   # Sparse aggregated features → tree binning captures is_zero vs
   # nonzero splits directly.
   binning: tree
-  # Probing OFF until a sparse cache exists. To enable:
+  # Probing ON: rescues sparse features whose univariate IV is weak but whose
+  # is_zero vs >0 split carries multivariate signal. Requires the sparse
+  # cache built by:
   #   PYTHONPATH=src python3 scripts/build_sparse_cache.py --product hzz_day
-  # then flip enabled: true.
   probing:
-    enabled: false
+    enabled: true
     cache_dir: data/cache/hzz_day
     weight_in_rank_score: 0.25
     num_boost_round: 300
@@ -203,6 +213,14 @@ analysis_overrides:
 training_overrides:
   top_k_pct: 0.10
   final_feature_count: 200
+  # Two-stage funnel: Stage-1 hands Stage-2 a wider candidate pool (800)
+  # so multivariate XGB gain — not univariate IV alone — picks the final 200.
+  # Rationale: with 4 business tables (jt/bt/jq/fx/beau) and family-policy
+  # cuts already in place, top-200 by univariate rank can drop features that
+  # are individually weak but contribute via cross-domain interactions; an
+  # 800→200 funnel gives those interaction signals a chance to surface in
+  # a multivariate model before final selection. Set to null to disable.
+  stage2_candidate_count: 800
   hyperopt_max_evals: 2             # smoke value; bump to 20-50 for real runs
   split:
     strategy: time                  # use cd_time for chronological split
