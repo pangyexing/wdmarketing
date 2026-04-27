@@ -1,0 +1,51 @@
+# Smoke-test config: same shape as hzz_raw.yaml but pointing at the
+# synthetic data emitted by scripts/build_hzz_raw_synthetic.py.
+
+input_dir: data/hzz_raw_synth
+output_dir: data/hzz_synth_out
+
+sources:
+  day:
+    row_chunks: 3
+    feature_tables: 4
+    file_pattern: "hzz_d_feat{row}{table}.csv"
+    per_table_out: "day/feat_t{table}.csv"
+    merged_out: "day/merged.csv"
+  mon:
+    row_chunks: 1
+    feature_tables: 4
+    file_pattern: "hzz_m_feat{table}.csv"
+    per_table_out: "mon/feat_t{table}.csv"
+    merged_out: "mon/merged.csv"
+
+id_col: cust_id
+time_col: cd_time
+time_col_aliases: [cd_time, dt, statis_date, partition_date, biz_dt]
+time_input_format: "yyyy-mm-dd"
+label_col: label_register
+
+drop_cols:
+  common: [label_credit, label_credit_level]
+  per_table:
+    day:
+      t1: []
+      t2: []
+      t3: []
+      t4: []
+    mon:
+      t1: []
+      t2: []
+      t3: []
+      t4: []
+
+dedup:
+  enabled: true
+  ignore_time: true
+  keep: min_time
+
+read_chunksize: 100000
+shard_count: 4
+
+merge:
+  enabled: false
+  how: outer

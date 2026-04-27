@@ -1,0 +1,69 @@
+# hzz raw preprocessing config — used by scripts/preprocess_hzz_raw.py.
+# This is intentionally separate from configs/products/hzz_day.yaml
+# (which is a training-config). Path semantics: relative paths resolve
+# against the repo root (i.e. the directory containing this configs/ dir).
+
+input_dir: data/hzz_raw          # contains day/ and mon/ subdirs
+output_dir: data/hzz             # outputs land in <output_dir>/<gran>/
+
+# Per-granularity layout. day is 3 row-chunks × 4 feature-tables (12 files);
+# mon is 4 single-file feature tables (no row split).
+sources:
+  day:
+    row_chunks: 3
+    feature_tables: 4
+    file_pattern: "hzz_d_feat{row}{table}.csv"
+    per_table_out: "day/feat_t{table}.csv"
+    merged_out: "day/merged.csv"
+  mon:
+    row_chunks: 1                # 1 = no row-split; {row} placeholder unused
+    feature_tables: 4
+    file_pattern: "hzz_m_feat{table}.csv"
+    per_table_out: "mon/feat_t{table}.csv"
+    merged_out: "mon/merged.csv"
+
+# Column semantics
+id_col: cust_id
+time_col: cd_time                # canonical name; aliases below get renamed to it
+time_col_aliases:                # ordered; first match wins. Production tables
+  - cd_time                      # often disagree on this column's name.
+  - dt
+  - statis_date
+  - partition_date
+  - biz_dt
+time_input_format: "yyyy-mm-dd"  # informational; script accepts both yyyy-mm-dd and yyyymmdd
+label_col: label_register        # all 4 tables carry this; merged.csv keeps t1's only
+
+# Column drops. effective_drop = common ∪ per_table[gran][f"t{table}"].
+# Names that don't exist in a given file are silently ignored.
+drop_cols:
+  common: [label_credit, label_credit_level]
+  per_table:
+    day:
+      t1: []
+      t2: []
+      t3: []
+      t4: []
+    mon:
+      t1: []
+      t2: []
+      t3: []
+      t4: []
+
+# Dedup: rows where every column except time_col is identical → collapse.
+# CLI --dedup / --no-dedup overrides .enabled.
+# CLI --dedup-keep overrides .keep.
+dedup:
+  enabled: true
+  ignore_time: true
+  keep: min_time                 # min_time | max_time | first | last
+
+# Memory budget knobs
+read_chunksize: 100000           # rows per pandas read_csv chunk
+shard_count: 8                   # id-hash shards (Stage B dedup + Stage C merge)
+                                 # peak mem ≈ table_rows / shard_count × n_cols × 8B (Stage B)
+                                 #          ≈ table_rows / shard_count × Σ_t n_cols_t × 8B (Stage C)
+
+merge:
+  enabled: false                 # CLI --merge / --no-merge overrides
+  how: outer                     # outer | inner | left  (left base = t1)
