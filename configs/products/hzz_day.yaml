@@ -230,6 +230,7 @@ training_overrides:
   # a multivariate model before final selection. Set to null to disable.
   stage2_candidate_count: 800
   hyperopt_max_evals: 2             # smoke value; bump to 20-50 for real runs
+  cv_folds: 3                       # 3-fold CV for hyperopt — faster, variance still acceptable on 70k+ rows
   split:
     strategy: time                  # use cd_time for chronological split
     # strategy: stratified          # alternative: random stratified split (use when time_column is null or unreliable)

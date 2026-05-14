@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _search_space(cfg):
     space = {
-        "max_depth": hp.choice("max_depth", [3, 4, 5, 6, 7, 8]),
+        "max_depth": hp.choice("max_depth", [3, 4, 5, 6]),
         "min_child_weight": hp.quniform("min_child_weight", 1, 50, 1),
         "subsample": hp.uniform("subsample", 0.6, 1.0),
         "colsample_bytree": hp.uniform("colsample_bytree", 0.5, 1.0),
@@ -32,7 +32,7 @@ def _search_space(cfg):
         "gamma": hp.loguniform("gamma", math.log(1e-3), math.log(5.0)),
         "scale_pos_weight_choice": hp.choice("scale_pos_weight_choice",
                                              ["auto", "half_auto", "double_auto", "one"]),
-        "n_estimators": hp.quniform("n_estimators", 200, 1500, 50),
+        "n_estimators": hp.quniform("n_estimators", 200, 300, 25),
     }
     return space
 
@@ -94,7 +94,7 @@ def run_hyperopt(X_train, y_train, cfg, trials_path=None, max_evals=None):
             nfold=cv_folds,
             stratified=True,
             metrics=["aucpr"],
-            early_stopping_rounds=50,
+            early_stopping_rounds=25,
             seed=seed,
             shuffle=True,
             verbose_eval=False,
