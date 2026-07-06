@@ -1,2 +1,0 @@
-python3 scripts/build_sparse_cache.py --product home_credit
-PYTHONPATH=src python3 scripts/run_analysis.py --product home_credit
