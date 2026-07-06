@@ -177,7 +177,7 @@ PYTHONPATH=src $PY scripts/run_funnel_eval.py \
 取贴合投放目标且提升更高者上线。
 
 需要更细的探索(连续 top-K 提升曲线、漏斗对比图、资质 V1/V2 汇总)时,
-用 `notebooks/06_funnel_eval_xc.ipynb`(内核选带 xgboost 的 env_ml 环境)。
+用 `notebooks/10_funnel_eval_xc.ipynb`(内核选带 xgboost 的 env_ml 环境)。
 
 ## 7. 上线部署与打分(以选定资质 V1 为例)
 
@@ -234,7 +234,7 @@ EOF
 - 监控融合分分布漂移(对照两个 bundle 内 `validation_samples.csv` 的分数区间)与
   reg/finish/credit 各段转化率;漂移明显或提升衰减 → 回到第 1 步用新数据重训
   (新 run-id,旧 bundle 保留可回滚);
-- 交互式监控工具:`notebooks/07_xc_monitoring.ipynb`(内核 env_ml)——
+- 交互式监控工具:`notebooks/11_xc_monitoring.ipynb`(内核 env_ml)——
   新批次 vs 训练参照窗的分数 PSI、头部特征 PSI(缺失率跳变同样计入)、
   标签成熟后按线上 α 固定排序的上线窗口转化复盘(对照验收报告);
 - xc 特征上游口径变更,必须重新走第 2~6 步全流程。

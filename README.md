@@ -136,23 +136,44 @@ PYTHONPATH=src python3 scripts/run_funnel_eval.py \
 注意：中间/下游/平行结果列绝不能入特征（各 config 已 park 在 `id_columns`，如 `xc_qual_finish` 里的 `is_credit_1v1` 与原始 `credit_1v1`）。`xc_qual_finish_1v1` 的 `credit_1v1` 同时被 `training.sample_weight` 引用 —— 只作训练损失权重，调参 P@K、早停与上报指标均按人头不加权。
 
 生产环境完整执行步骤（含检查点、验收标准、上线打分与监控）见 `docs/PRODUCTION_RUNBOOK.md`；
-交互式漏斗探索（连续 top-K 提升曲线、资质 V1/V2 对比）见 `notebooks/06_funnel_eval_xc.ipynb`。
+交互式漏斗探索（连续 top-K 提升曲线、资质 V1/V2 对比）见 `notebooks/10_funnel_eval_xc.ipynb`。
 
 ### Notebooks
 
-`notebooks/` 按工作流编号。01–05 通过开头的 `PRODUCT` / `RUN_ID` 参数适配任意产品（默认 xc，非 xc 产品运行时 xc 专属格自动跳过）；06/07 为 xc 专属。04–07 内核需带 xgboost（conda `env_ml`）。
+`notebooks/` 按工作流编号。01–05 通过开头的 `PRODUCT` / `RUN_ID` 参数适配任意产品（默认 xc，非 xc 产品运行时 xc 专属格自动跳过）；00 与 06–09 面向 hzz / home_credit 工作流；10/11 为 xc 专属。04 及之后的内核需带 xgboost（conda `env_ml`）。
 
 | notebook | 用途 | 对应 runbook |
 |---|---|---|
+| `00_hzz_raw_preprocess_check` | `preprocess_hzz_raw.py` 预处理产物 sanity check（12 day + 4 mon 原始表 → per-table / merged） | hzz 数据落地 |
 | `01_data_overview` | 数据/合表总览：标签与档位分布、分析漏斗、标签成熟度、join 质检、缺失概览 | 第 1 步检查点 |
 | `02_feature_analysis` | Stage-1 报告解读：rank_score 口径、lift 软门槛、PSI 稳定性、相关性簇、per-feature 图 | 第 2 步 |
 | `03_feature_selection_review` | 筛选链路 v1_auto→v2_model→v3_manual diff、null importance 体检、跨 xc 产品清单重叠 | 第 2.5/3 步检查点 |
 | `04_model_training` | Stage-2 交互训练：切分体检、hyperopt 轨迹、训练后退化/lift 快速诊断 | 第 4 步（探索） |
 | `05_model_evaluation` | 训练产物验收：manifest/校准体检、退化检查、分位 lift、5 个 xc 模型横向汇总 | 第 4/5 步检查点 |
-| `06_funnel_eval_xc` | 融合漏斗探索：连续 top-K 曲线、alpha 敏感性、conditional 分段、资质 V1/V2 对比 | 第 6 步（探索） |
-| `07_xc_monitoring` | 上线后监控与复盘：分数/特征 PSI 漂移、上线窗口转化复盘（固定线上 α） | 第 8 步 |
+| `06_window_family_analysis` | 时间窗家族排序偏差诊断："越久覆盖率越高 → 排名越前"的定量分析与缓解开关评估 | Stage-1 复盘 |
+| `07_stage2_funnel_audit` | Stage-2 候选→最终漏斗审计：探索 ranker 打分、剪枝前后对比 | Stage-2 复盘 |
+| `08_seed_distribution_compare` | 种子人群 (ABCD) 特征分布对比：双基准 PSI，看输入端漂移 | 上线人群体检 |
+| `09_seed_score_compare` | ABCD vs OOT 模型分数分布对比，看输出端漂移 | 上线人群体检 |
+| `10_funnel_eval_xc` | 融合漏斗探索：连续 top-K 曲线、alpha 敏感性、conditional 分段、资质 V1/V2 对比 | 第 6 步（探索） |
+| `11_xc_monitoring` | 上线后监控与复盘：分数/特征 PSI 漂移、上线窗口转化复盘（固定线上 α） | 第 8 步 |
 
 ## 关键配置说明
+
+### 特征筛选漏斗（三个可选的模型信号，按需启用其一）
+
+Stage-1 统计筛选（PSI/IV/Lift/相关性 → `v1_auto.txt`）之外，共有三个**模型驱动**的筛选机制。它们解决同一个问题（用模型信号收窄特征清单），但介入的阶段不同——同一产品通常只启用其中一条，避免叠加后难以归因：
+
+| 机制 | 介入点 | 输入/输出 | 何时用 |
+|---|---|---|---|
+| **probing**（`analysis.probing.enabled` + `scripts/build_sparse_cache.py`） | Stage-1 打分内 | CSR 稀疏缓存 → `gain_rank_pct` 加权进 `rank_score` | 高维稀疏宽表（千维+），想让交互级信号影响 v1_auto 排名本身 |
+| **null importance**（`analysis.null_importance.enabled` 或 `run_analysis.py --model-screen`） | Stage-1 之后（Stage-1.5） | `v1_auto.txt` → 目标置换筛选 → `v2_model.txt` | 想要一个显式的"模型体检"清单版本，人工 review 后再进 Stage-2（xc 线的默认路径） |
+| **Stage-2 候选漏斗**（`training.stage2_candidate_count` + `stage2_pruning`） | Stage-2 训练内 | 宽候选池 → 探索 XGB（gain/stability/shap/permutation）→ `final_feature_count` | 不想维护多份清单文件，让训练流程自己收窄（hzz 线的默认路径） |
+
+`analysis.stage1_top_n` 显式控制 `v1_auto.txt` 大小，且优先于 `stage2_candidate_count` 推导的候选池大小。
+
+### hzz 原始数据预处理
+
+hzz 线的原始多表数据先经 `scripts/preprocess_hzz_raw.py`（配置在 `configs/preprocess/hzz_raw.yaml`）合成建模宽表，再走标准 Stage-1/2；产物质检见 `notebooks/00_hzz_raw_preprocess_check.ipynb`。合成冒烟数据可用 `scripts/build_hzz_raw_synthetic.py` / `build_hzz_day_synthetic.py` 生成。
 
 ### 缺失值规则
 
