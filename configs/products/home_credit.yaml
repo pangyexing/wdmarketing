@@ -88,6 +88,9 @@ training_overrides:
   top_k_pct: 0.10
   final_feature_count: 200   # plan default — target deploy size
   hyperopt_max_evals: 2      # smoke test; bump to 20-50 for real runs
+  # Tune on forward-chaining time folds so hyperparameters are selected
+  # under the same regime as the time-based deployment split.
+  cv_strategy: time_forward
   split:
     strategy: time           # exercise yyyymmdd-based time split end-to-end
     ratios: [0.70, 0.15, 0.15]

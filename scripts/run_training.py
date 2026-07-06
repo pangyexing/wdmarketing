@@ -48,9 +48,9 @@ def main():
     with prog.step("build dataset (features {0})".format(version)):
         data = build_dataset(cfg, version=version)
 
-    # 1b. Stage-2 candidate → final pruning. No-op when stage2_candidate_count
-    # is not set (or already ≤ final_feature_count); legacy callers see this
-    # as a pass-through.
+    # 1b. Stage-2 candidate → final funnel. Fires only when
+    # training.stage2_candidate_count is set AND the loaded pool exceeds
+    # final_feature_count; otherwise a pass-through.
     data = maybe_prune_to_final(data, cfg, run_dir)
 
     # 2. Hyperopt

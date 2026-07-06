@@ -22,9 +22,13 @@ logger = logging.getLogger(__name__)
 CALIBRATION_FILENAME = "calibration.json"
 
 
-def fit_isotonic_table(y_true, scores, min_rows=200, min_pos=10):
+def fit_isotonic_table(y_true, scores, min_rows=200, min_pos=10,
+                       fit_split="valid"):
     """Fit isotonic regression of y_true on scores; return a JSON-able table
     dict, or None (with a warning) when the sample is too small or degenerate.
+
+    fit_split: provenance label recorded in the table ("valid_calib" when fit
+    on the dedicated calibration holdout, "valid" for the legacy full-valid fit).
     """
     y = np.asarray(y_true, dtype=np.float64)
     s = np.asarray(scores, dtype=np.float64)
@@ -58,7 +62,7 @@ def fit_isotonic_table(y_true, scores, min_rows=200, min_pos=10):
     table = {
         "version": 1,
         "method": "isotonic",
-        "fit_split": "valid",
+        "fit_split": str(fit_split),
         "n_fit": int(y.size),
         "n_pos": n_pos,
         "base_rate": float(np.mean(y)),

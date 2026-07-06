@@ -33,8 +33,9 @@ Ranking methods (training.stage2_pruning.ranking_method):
                               set shap_fallback="raise" to fail loud.
   * "shap_stability"        — n_seeds × shap. Same fallback contract.
 
-No-op when the candidate pool is already ≤ final_feature_count. The legacy
-path then sees this function as a pass-through.
+No-op when training.stage2_candidate_count is not set (the funnel is opt-in)
+or when the candidate pool is already ≤ final_feature_count. The legacy path
+then sees this function as a pass-through.
 """
 import dataclasses
 import logging
@@ -267,14 +268,26 @@ def maybe_prune_to_final(data: StageTwoData, cfg: Dict,
                          run_dir: Optional[Path] = None) -> StageTwoData:
     """Shrink the candidate pool to final_feature_count via the configured ranker.
 
-    Returns the original ``data`` unchanged when the candidate pool is already
-    at/below ``final_feature_count``. When pruning fires and ``run_dir`` is
-    supplied, writes ``exploratory_importance.csv`` (with ``score`` + ``kept``)
-    and ``pruned_features.txt`` so the reduction is auditable.
+    The funnel fires only when ``training.stage2_candidate_count`` is set
+    (the documented opt-in) AND the candidate pool exceeds
+    ``final_feature_count``. With the funnel disabled the loaded feature list
+    is trained as-is — a screen the config never asked for must not run.
+    When pruning fires and ``run_dir`` is supplied, writes
+    ``exploratory_importance.csv`` (with ``score`` + ``kept``) and
+    ``pruned_features.txt`` so the reduction is auditable.
     """
     training_cfg = cfg["training"]
     final_n = int(training_cfg["final_feature_count"])
+    candidate_n = training_cfg.get("stage2_candidate_count")
     n_base = len(data.base_feature_list)
+    if not candidate_n:
+        if n_base > final_n:
+            logger.info(
+                "Stage-2 funnel disabled (stage2_candidate_count not set) — "
+                "training on all %d loaded features. final_feature_count=%d "
+                "only gates the funnel; set stage2_candidate_count to enable "
+                "the exploratory pruning.", n_base, final_n)
+        return data
     if n_base <= final_n:
         logger.info("Stage-2 pruning skipped: candidate pool (%d base features) "
                     "≤ final_feature_count (%d).", n_base, final_n)
@@ -315,6 +328,8 @@ def maybe_prune_to_final(data: StageTwoData, cfg: Dict,
         X_train=data.X_train[:, cols],
         X_valid=data.X_valid[:, cols],
         X_oot=data.X_oot[:, cols],
+        X_calib=(data.X_calib[:, cols]
+                 if getattr(data, "X_calib", None) is not None else None),
         feature_list=new_feature_list,
         base_feature_list=kept_bases,
         indicator_features=kept_indicators,

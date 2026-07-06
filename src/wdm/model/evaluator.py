@@ -35,9 +35,10 @@ def _predict(booster, X):
         return booster.predict(dmat, ntree_limit=booster.best_ntree_limit)
 
 
-def _metrics_for_split(name, y, score, top_k_pct):
+def _metrics_for_split(name, y, score, top_k_pct, note=""):
     return {
         "split": name,
+        "note": note,
         "n": int(len(y)),
         "base_rate": float(np.mean(y)),
         "roc_auc": roc_auc(y, score),
@@ -62,16 +63,30 @@ def evaluate_all(booster, data, cfg):
     s_va = _predict(booster, data.X_valid)
     s_oot = _predict(booster, data.X_oot)
 
+    # valid drove early stopping (and possibly feature pruning), so its
+    # metrics are model-selection numbers, not a clean generalization
+    # estimate — only oot is. The note column keeps readers honest.
     rows = [
         _metrics_for_split("train", data.y_train, s_tr, top_k_pct),
-        _metrics_for_split("valid", data.y_valid, s_va, top_k_pct),
-        _metrics_for_split("oot",   data.y_oot,   s_oot, top_k_pct),
+        _metrics_for_split("valid", data.y_valid, s_va, top_k_pct,
+                           note="model-selection set (early stop / pruning)"),
+        _metrics_for_split("oot",   data.y_oot,   s_oot, top_k_pct,
+                           note="held out"),
     ]
     binned = {
         "train": compute_binned_lift(data.y_train, s_tr, n_bins=10),
         "valid": compute_binned_lift(data.y_valid, s_va, n_bins=10),
         "oot":   compute_binned_lift(data.y_oot,   s_oot, n_bins=10),
     }
+
+    # Calibration holdout (when carved): reported like any split so drift
+    # between the selection half and the calibration half is visible.
+    if getattr(data, "X_calib", None) is not None:
+        s_cal = _predict(booster, data.X_calib)
+        rows.insert(2, _metrics_for_split(
+            "valid_calib", data.y_calib, s_cal, top_k_pct,
+            note="calibration holdout"))
+        binned["valid_calib"] = compute_binned_lift(data.y_calib, s_cal, n_bins=10)
 
     # Companion metric on the non-all-NA OOT subset: "oot" is the
     # production-equivalent view, "oot_excl_all_na" strips out rows with zero

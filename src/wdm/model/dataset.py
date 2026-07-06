@@ -55,13 +55,35 @@ class StageTwoData:
     w_train: Optional[np.ndarray] = None
     w_valid: Optional[np.ndarray] = None
     w_oot: Optional[np.ndarray] = None
+    # Calibration holdout carved from valid (training.calibration_split_fraction,
+    # only when export.calibration is enabled): X_valid/y_valid keep the
+    # early-stopping/selection half; this is the time-later half reserved for
+    # isotonic fitting, so the calibration curve is never fit on the set that
+    # drove early stopping. None when disabled. calib_mask marks the holdout
+    # rows at raw-CSV length (valid_mask excludes them, keeping the invariant
+    # valid_mask.sum() == len(y_valid)).
+    X_calib: Optional[np.ndarray] = None
+    y_calib: Optional[np.ndarray] = None
+    dt_calib: Optional[np.ndarray] = None
+    w_calib: Optional[np.ndarray] = None
+    calib_mask: np.ndarray = dataclasses.field(
+        default_factory=lambda: np.zeros(0, dtype=bool))
 
 
 def _load_selected_features(cfg, version=None):
     from wdm.utils.paths import selected_features_file
     p = selected_features_file(cfg, version)
     if not p.is_file():
-        raise FileNotFoundError("Selected features file not found: {0}".format(p))
+        hint = ""
+        if p.stem == "v2_model":
+            hint = (" v2_model.txt is produced by the Stage-1.5 model screen — "
+                    "run `scripts/run_analysis.py --product {0} --model-screen` "
+                    "(or scripts/run_model_screen.py) first.".format(cfg["name"]))
+        elif p.stem == "v1_auto":
+            hint = (" v1_auto.txt is produced by Stage-1 — run "
+                    "`scripts/run_analysis.py --product {0}` first.".format(cfg["name"]))
+        raise FileNotFoundError(
+            "Selected features file not found: {0}.{1}".format(p, hint))
     feats = []
     with open(p, "r", encoding="utf-8") as f:
         for line in f:
@@ -307,6 +329,52 @@ def build_dataset(cfg, version=None):
     w_tr = _filter_aux(w_tr, all_na_tr)
     w_va = _filter_aux(w_va, all_na_va)
 
+    # Carve a calibration holdout out of valid so isotonic calibration is not
+    # fit on the same rows that drive early stopping / feature pruning. With a
+    # time column the LATER tail becomes the holdout (closest to OOT /
+    # production); otherwise a seeded random subset. Only carved when
+    # export.calibration is enabled — without calibration the holdout would
+    # shrink the early-stopping set for nothing. calibration_split_fraction=0
+    # disables (legacy: calibration then fits on the full valid).
+    X_cal = y_cal = dt_cal = w_cal = None
+    calib_mask = np.zeros(len(valid_mask), dtype=bool)
+    calib_frac = float(cfg["training"].get("calibration_split_fraction", 0.5) or 0.0)
+    calib_enabled = bool(((cfg.get("export") or {}).get("calibration") or {})
+                         .get("enabled", False))
+    if calib_frac > 0 and calib_enabled:
+        n_va_rows = int(y_va.shape[0])
+        n_cal = int(round(n_va_rows * calib_frac))
+        if n_cal >= 1 and n_va_rows - n_cal >= 1:
+            if dt_va is not None:
+                order = np.argsort(np.where(np.isnan(dt_va), np.inf, dt_va),
+                                   kind="mergesort")
+            else:
+                order = np.random.RandomState(
+                    int(cfg["training"]["random_seed"])).permutation(n_va_rows)
+            cal_sel = np.zeros(n_va_rows, dtype=bool)
+            cal_sel[order[n_va_rows - n_cal:]] = True
+            X_cal, y_cal = X_va[cal_sel], y_va[cal_sel]
+            dt_cal = dt_va[cal_sel] if dt_va is not None else None
+            w_cal = w_va[cal_sel] if w_va is not None else None
+            X_va, y_va = X_va[~cal_sel], y_va[~cal_sel]
+            dt_va = dt_va[~cal_sel] if dt_va is not None else None
+            w_va = w_va[~cal_sel] if w_va is not None else None
+            # Raw-length bookkeeping: valid rows (post all-NA drop) map 1:1,
+            # in order, onto valid_mask's True positions.
+            vpos = np.where(valid_mask)[0]
+            calib_mask[vpos[cal_sel]] = True
+            valid_mask[vpos[cal_sel]] = False
+            logger.info(
+                "Valid carved: early-stop/selection n=%d, calibration holdout "
+                "n=%d (calibration_split_fraction=%.2f, %s).",
+                int(y_va.shape[0]), n_cal, calib_frac,
+                "time-ordered tail" if dt_cal is not None else "random subset")
+        else:
+            logger.warning(
+                "calibration_split_fraction=%.2f would leave an empty half "
+                "(n_valid=%d) — carve skipped; calibration will fall back to "
+                "the early-stopping valid set.", calib_frac, n_va_rows)
+
     feat_order = list(feats) + indicator_feats
 
     return StageTwoData(
@@ -327,4 +395,6 @@ def build_dataset(cfg, version=None):
         oot_all_na_mask=np.asarray(all_na_oot).copy(),
         dt_train=dt_tr, dt_valid=dt_va, dt_oot=dt_oot,
         w_train=w_tr, w_valid=w_va, w_oot=w_oot,
+        X_calib=X_cal, y_calib=y_cal, dt_calib=dt_cal, w_calib=w_cal,
+        calib_mask=calib_mask,
     )

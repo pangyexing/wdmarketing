@@ -102,6 +102,46 @@ def _validate(cfg: Dict[str, Any]) -> None:
         raise ValueError("training.cv_strategy must be 'stratified' or 'time_forward'")
     if cv_strategy == "time_forward" and not data.get("time_column"):
         raise ValueError("training.cv_strategy='time_forward' requires data.time_column")
+    if (cfg["training"].get("split", {}).get("strategy") == "time"
+            and cv_strategy == "stratified"):
+        logger.warning(
+            "split.strategy='time' but cv_strategy='stratified': hyperopt "
+            "tunes on shuffled folds that ignore time order, so tuned "
+            "hyperparameters may not match the time-based deployment split. "
+            "Set training.cv_strategy: time_forward unless this is deliberate.")
+
+    final_n = cfg["training"].get("final_feature_count")
+    s2c = cfg["training"].get("stage2_candidate_count")
+    if s2c is not None:
+        if not isinstance(s2c, int) or isinstance(s2c, bool) or s2c <= 0:
+            raise ValueError("training.stage2_candidate_count must be a "
+                             "positive integer or null")
+        if isinstance(final_n, int) and s2c < final_n:
+            raise ValueError(
+                "training.stage2_candidate_count ({0}) must be >= "
+                "final_feature_count ({1}) — a candidate pool smaller than "
+                "the final set makes the funnel meaningless".format(s2c, final_n))
+
+    # Fail on ranker typos at config load, not after dataset build + tuning.
+    # Keep in sync with feature_pruner._RANKERS (not imported here: that
+    # module requires xgboost at import time).
+    _rankers = {"gain", "stability", "permutation", "permutation_stability",
+                "shap", "shap_stability"}
+    prune = cfg["training"].get("stage2_pruning") or {}
+    rm = prune.get("ranking_method")
+    if rm is not None and str(rm).lower() not in _rankers:
+        raise ValueError("training.stage2_pruning.ranking_method {0!r} invalid; "
+                         "expected one of {1}".format(rm, sorted(_rankers)))
+    fb = prune.get("shap_fallback")
+    if fb is not None and str(fb).lower() not in (_rankers - {"shap", "shap_stability"}) | {"raise"}:
+        raise ValueError("training.stage2_pruning.shap_fallback {0!r} invalid; "
+                         "expected a non-shap ranking method or 'raise'".format(fb))
+
+    csf = cfg["training"].get("calibration_split_fraction", 0.5)
+    if csf is not None and (not isinstance(csf, (int, float))
+                            or isinstance(csf, bool)
+                            or not (0 <= float(csf) < 1)):
+        raise ValueError("training.calibration_split_fraction must be in [0, 1)")
 
     sw = cfg["training"].get("sample_weight")
     if sw is not None:

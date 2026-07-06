@@ -231,6 +231,9 @@ training_overrides:
   stage2_candidate_count: 800
   hyperopt_max_evals: 2             # smoke value; bump to 20-50 for real runs
   cv_folds: 3                       # 3-fold CV for hyperopt — faster, variance still acceptable on 70k+ rows
+  # Tune on forward-chaining time folds so hyperparameters are selected
+  # under the same regime as the time-based deployment split.
+  cv_strategy: time_forward
   split:
     strategy: time                  # use cd_time for chronological split
     # strategy: stratified          # alternative: random stratified split (use when time_column is null or unreliable)

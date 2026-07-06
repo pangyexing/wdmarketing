@@ -29,7 +29,10 @@ missing:
     generate_missing_indicator: false
 
 selected_features:
-  active_version: v1_auto
+  # v2_model = the null-importance screen's output (the xc default path);
+  # produced by run_analysis --model-screen. v1_auto trains on the raw
+  # Stage-1 pool without the screen.
+  active_version: v2_model
   versions_dir: artifacts/xc_e2e_credit_1v1/selected_features
 
 feature_groups:

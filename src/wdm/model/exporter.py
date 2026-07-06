@@ -286,24 +286,60 @@ def _probing_fingerprint(cfg):
 
 
 def _fit_calibration(cfg, data, booster, scores=None):
-    """Fit the isotonic table on VALID scores (reusing evaluator scores when
-    passed). Returns the table dict or None (disabled / guarded out)."""
+    """Fit the isotonic table — on the dedicated calibration holdout when the
+    dataset carved one (training.calibration_split_fraction > 0), otherwise on
+    the full valid split (legacy; that set also drove early stopping, so the
+    curve is optimistic). Returns the table dict or None (disabled / guarded).
+    """
     calib_cfg = cfg["export"].get("calibration") or {}
     if not calib_cfg.get("enabled", False):
         return None
-    s_va = None
-    if scores is not None:
-        s_va = scores.get("valid")
-    if s_va is None:
-        dmat = xgb.DMatrix(data.X_valid)
+
+    def _predict(X):
+        dmat = xgb.DMatrix(X)
         try:
-            s_va = booster.predict(dmat, iteration_range=(0, booster.best_iteration + 1))
+            return booster.predict(dmat, iteration_range=(0, booster.best_iteration + 1))
         except Exception:
-            s_va = booster.predict(dmat)
+            return booster.predict(dmat)
+
+    if getattr(data, "X_calib", None) is not None:
+        y_fit = data.y_calib
+        s_fit = _predict(data.X_calib)
+        fit_split = "valid_calib"
+        logger.info("Calibration fit on the dedicated holdout (n=%d) — "
+                    "independent of the early-stopping set.", int(y_fit.size))
+    else:
+        y_fit = data.y_valid
+        s_fit = scores.get("valid") if scores is not None else None
+        if s_fit is None:
+            s_fit = _predict(data.X_valid)
+        fit_split = "valid"
+        logger.warning("Calibration fit on the FULL valid split (no holdout "
+                       "carved — calibration_split_fraction=0): valid also "
+                       "drove early stopping, so the curve may be optimistic.")
     return fit_isotonic_table(
-        data.y_valid, np.asarray(s_va, dtype=np.float64),
+        y_fit, np.asarray(s_fit, dtype=np.float64),
         min_rows=int(calib_cfg.get("min_valid_rows", 200)),
-        min_pos=int(calib_cfg.get("min_valid_pos", 10)))
+        min_pos=int(calib_cfg.get("min_valid_pos", 10)),
+        fit_split=fit_split)
+
+
+def _ranking_method_used(run_dir):
+    """The ranker that actually scored the Stage-2 funnel, read from the
+    exploratory_importance.csv this run wrote; None when the funnel didn't
+    fire. Differs from the configured ranking_method when the SHAP fallback
+    kicked in — recording it makes cross-machine feature-set differences
+    diagnosable from the manifest alone."""
+    p = Path(run_dir) / "exploratory_importance.csv"
+    if not p.is_file():
+        return None
+    try:
+        head = pd.read_csv(p, nrows=1)
+        if "ranking_method" in head.columns and len(head):
+            return str(head["ranking_method"].iloc[0])
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return None
 
 
 def _split_boundaries(data):
@@ -396,6 +432,9 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
             "stage2_candidate_count": cfg["training"].get("stage2_candidate_count"),
             "final_feature_count": cfg["training"]["final_feature_count"],
             "ranking_method": (cfg["training"].get("stage2_pruning") or {}).get("ranking_method"),
+            # The method that actually ranked (differs from ranking_method
+            # when the SHAP fallback fired); None when the funnel didn't run.
+            "ranking_method_used": _ranking_method_used(run_dir),
             "n_seeds": (cfg["training"].get("stage2_pruning") or {}).get("n_seeds"),
         },
         "split_strategy": cfg["training"]["split"]["strategy"],
@@ -410,6 +449,7 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "sample_weight": cfg["training"].get("sample_weight"),
         "exclude_rows": cfg["data"].get("exclude_rows"),
         "calibration": ({"file": CALIBRATION_FILENAME,
+                         "fit_split": calib_table.get("fit_split"),
                          "n_fit": calib_table["n_fit"],
                          "n_pos": calib_table["n_pos"]}
                         if calib_table is not None else None),

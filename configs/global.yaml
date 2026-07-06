@@ -245,6 +245,12 @@ training:
   hyperopt_max_evals: 50
   cv_folds: 5
   random_seed: 42
+  # Fraction of the valid split carved off as a dedicated calibration
+  # holdout (the time-later tail for time splits). Early stopping / pruning
+  # use the remaining valid half; isotonic calibration fits on the holdout —
+  # never on the set that drove model selection. 0 restores the legacy
+  # behavior (calibration fit on the full early-stopping valid set).
+  calibration_split_fraction: 0.5
   eval_metrics: ["aucpr", "auc"]
   # Hyperopt selection metric: aucpr (full-curve, legacy) or precision_at_k
   # (custom feval at training.top_k_pct — matches the top-K deployment goal).
