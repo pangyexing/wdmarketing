@@ -89,7 +89,9 @@ done
 
 **检查点**:`report/null_importance.csv` 中被剔除特征的 `gain_actual` 应明显
 低于其 `null_keep_ref`;`analysis/null_importance_meta.json` 的 `n_written`
-应接近 200(明显偏少说明大量候选未过显著性,复查 Stage-1 列表质量)。
+应接近 200。注意 `keep_percentile` 默认已收紧为 95(真实增益须超过自身
+零分布的 95 分位,纯噪声特征仅 ~5% 通过)——若 n_written 明显偏少,先复查
+Stage-1 列表质量,确属候选池弱才考虑下调该阈值。
 其余参数见 global.yaml `analysis.null_importance`。
 
 ## 3. 人工特征评审(强烈建议)
@@ -107,6 +109,8 @@ done
 ## 4. Stage-2 训练(5 个 xc 模型各一次)
 
 run-id 建议 `prod_<yyyymmdd>`。生产训练不要传 `--max-evals`(用配置默认 30)。
+xc 各产品 `active_version` 已默认 `v2_model`(不传 `--features-version` 即训练
+Stage-1.5 筛后清单);生产流程仍显式传人工评审后的 `v3_manual_noleak`。
 
 ```bash
 for p in xc_resp_finish xc_qual_finish xc_qual_finish_1v1 xc_e2e_credit xc_e2e_credit_1v1; do
@@ -118,8 +122,10 @@ done
 **检查点**:各 `artifacts/<xc 产品>/models/prod_20260610/metrics.md` 中 OOT 与 Valid
 指标不应大幅劣于 Train(KS/PR-AUC 腰斩即怀疑过拟合或时间漂移);
 `importance.csv` 头部特征业务可解释;`calibration.json` 存在且 `x` 单调递增、
-`y ∈ [0,1]`(valid 样本/正例过少会跳过校准并告警 —— 此时该 bundle 不能参与
-校准融合,需排查 valid 窗口);`run_manifest.json` 含 `split_boundaries`、
+`y ∈ [0,1]`、`fit_split` 为 `valid_calib`(校准拟合在独立留出段,不与早停
+共用;valid 样本/正例过少会跳过校准并告警 —— 此时该 bundle 不能参与
+校准融合,需排查 valid 窗口);metrics 中 `valid` 是模型选择集、`valid_calib`
+是校准留出段,验收以 `oot` 行为准;`run_manifest.json` 含 `split_boundaries`、
 `tuner_objective`、`cv_strategy`(1v1 产品另含 `sample_weight`)。
 
 ## 5. 部署一致性自测(5 个 bundle 必跑)

@@ -5,7 +5,7 @@
 ## 设计要点
 
 - **两阶段解耦**：Stage 1 只做特征分析与筛选（PSI/IV/WOE/Lift/相关性），全程不训模型；Stage 2 基于选定的特征列表跑 Hyperopt + XGBoost，产出可部署的预测程序。
-- **多产品通用**：每个产品一个 YAML（`configs/products/<name>.yaml`），与 `configs/global.yaml` 默认值合并。
+- **多产品通用**：每个产品一个 YAML（`configs/products/<name>.yaml`），与 `configs/global.yaml` 默认值合并；产品线共享块放在 `configs/families/<name>.yaml`，产品文件顶部 `extends: <name>` 引用（合并顺序 global → family → product，xc 五个产品即通过 `extends: xc_common` 去重）。
 - **分块无偏性**：3000+ 维特征按**列分块**流式分析，所有 PSI/IV/相关性与全表计算数学上等价（见 `tests/test_chunked_correctness.py`）。
 - **分析 vs 训练严格分离**：缺失值规则（0/负/空视为缺失，默认填 -999）只在 Stage 2 训练期落盘；Stage 1 分析一律用 NaN-aware 计算，`-999` 绝不污染 PSI/IV/相关性统计。
 - **三层相关性去重**：
@@ -171,10 +171,22 @@ Stage-1 统计筛选（PSI/IV/Lift/相关性 → `v1_auto.txt`）之外，共有
 | 机制 | 介入点 | 输入/输出 | 何时用 |
 |---|---|---|---|
 | **probing**（`analysis.probing.enabled` + `scripts/build_sparse_cache.py`） | Stage-1 打分内 | CSR 稀疏缓存 → `gain_rank_pct` 加权进 `rank_score` | 高维稀疏宽表（千维+），想让交互级信号影响 v1_auto 排名本身 |
-| **null importance**（`analysis.null_importance.enabled` 或 `run_analysis.py --model-screen`） | Stage-1 之后（Stage-1.5） | `v1_auto.txt` → 目标置换筛选 → `v2_model.txt` | 想要一个显式的"模型体检"清单版本，人工 review 后再进 Stage-2（xc 线的默认路径） |
+| **null importance**（`analysis.null_importance.enabled` 或 `run_analysis.py --model-screen`） | Stage-1 之后（Stage-1.5） | `v1_auto.txt` → 目标置换筛选 → `v2_model.txt` | 想要一个显式的"模型体检"清单版本，人工 review 后再进 Stage-2（xc 线的默认路径，`active_version: v2_model` 已接线） |
 | **Stage-2 候选漏斗**（`training.stage2_candidate_count` + `stage2_pruning`） | Stage-2 训练内 | 宽候选池 → 探索 XGB（gain/stability/shap/permutation）→ `final_feature_count` | 不想维护多份清单文件，让训练流程自己收窄（hzz 线的默认路径） |
 
-`analysis.stage1_top_n` 显式控制 `v1_auto.txt` 大小，且优先于 `stage2_candidate_count` 推导的候选池大小。
+三条机制的触发口径：
+- **漏斗只在 `training.stage2_candidate_count` 显式设置时触发**（且候选池 > `final_feature_count`）；未设置时训练直接使用加载的清单，绝不隐式剪枝。`run_manifest.json` 的 `feature_funnel.ranking_method_used` 记录实际使用的 ranker（SHAP 降级可查）。
+- null importance 的 `keep_percentile` 默认 95（实际增益须超过自身零分布的 95 分位，纯噪声特征只有 ~5% 通过率）。
+- `analysis.stage1_top_n` 显式控制 `v1_auto.txt` 大小，且优先于 `stage2_candidate_count` 推导的候选池大小。
+
+### 方法论口径（防泄漏与评估诚实性）
+
+- **Stage-1 监督统计 train-only**：IV/WOE 分箱、Lift@K、Gini 只在 `training.split` 的 train 段上拟合（`analysis.supervised_stats_split: train_only`，默认），valid/OOT 标签不参与特征入选；缺失率/PSI/相关性等无标签统计仍用全量。设 `full` 可复现旧口径。
+- **时间切分按日对齐**：`split_by_yyyymmdd` 切点吸附到自然日边界（同一天绝不横跨两个切分），与 CV fold 的保证一致；`training.split.embargo_days` 可在切点后留出隔离窗（前瞻窗口标签防边界泄漏）。
+- **PSI 分区**：`analysis.psi_partition: train_vs_rest` 直接度量 train → valid+OOT 的漂移（时间切分产品推荐）；默认 `halves` 为通用前后对半。无时间列时 PSI 自动降为仅报告（不进 rank_score）。
+- **校准独立留出**：valid 按时间序二分（`training.calibration_split_fraction`，默认 0.5）——前半供早停/剪枝，后半 `valid_calib` 专供 isotonic 校准拟合，校准曲线不再拟合在早停集上；`calibration.json` 与 `run_manifest.json` 记录 `fit_split`。评估表中 valid 标注为 model-selection set，`valid_calib` 单独成行。
+- **筛选模型与部署模型同不平衡口径**：probing / stage2 探索 ranker / null importance 均默认 `scale_pos_weight = neg/pos`，与最终模型的调参口径一致（xgb_params 显式配置可覆盖）。
+- **调参 CV 匹配部署切分**：时间切分产品配 `cv_strategy: time_forward`（xc/home_credit/hzz_day 均已配置）；配置加载时对 time split + 乱序 CV 的组合给出告警。
 
 ### hzz 原始数据预处理
 
@@ -223,6 +235,10 @@ hzz 线的原始多表数据先经 `scripts/preprocess_hzz_raw.py`（配置在 `
 python3 -m pytest tests/ -v
 ```
 
+提交 notebook 前请清空执行输出（保持 diff 干净、避免仓库膨胀）：
+`jupyter nbconvert --clear-output --inplace notebooks/<name>.ipynb`，
+或安装 [nbstripout](https://github.com/kynan/nbstripout)（`nbstripout --install`）一次性挂上 git filter。
+
 关键测试：
 - `test_chunked_correctness.py` —— 列分块 vs 全表 PSI/IV/相关性差 < 1e-10，**如失败则 Stage 1 结果全部不可信**
 - `test_missing.py` —— 缺失值规则、sanity check、special 策略 roundtrip
@@ -236,6 +252,8 @@ python3 -m pytest tests/ -v
 | noleak (v2_manual_noleak) | 否 | 0.45 | 4.12 | 3.84 |
 
 剔除泄漏特征 `duration` 后模型依旧保持 ≥ 3× Lift，说明 XGBoost 仍能从 `poutcome / pdays / contact` 等特征学出有效排序。
+
+> 备注：`v2_manual_noleak` 是**手工维护**的清单（`artifacts/home_credit/selected_features/v2_manual_noleak.txt`，由 v1_auto 人工剔除 `duration` 等泄漏特征而来），仓库内没有生成脚本；改动它请在提交信息里说明剔除依据。
 
 ## 未来扩展
 
