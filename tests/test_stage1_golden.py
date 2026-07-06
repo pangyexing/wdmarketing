@@ -9,6 +9,7 @@ If it fails after an environment upgrade (numpy/pandas float formatting),
 regenerate the snapshot with scripts/dev_make_stage1_golden.py and review
 the diff intentionally — see snapshot_meta.json for the recorded versions.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -24,6 +25,32 @@ EXPECTED_DIR = HERE / "stage1_golden" / "expected"
 pytestmark = pytest.mark.skipif(
     not EXPECTED_DIR.is_dir(),
     reason="golden snapshot missing — run scripts/dev_make_stage1_golden.py first")
+
+
+def test_environment_matches_snapshot():
+    """Byte-level comparison is only meaningful in the environment the
+    snapshot was generated under — numpy/pandas float formatting differs
+    across versions. Fail HERE with an actionable message instead of a
+    baffling byte-diff in the tests below.
+    """
+    import numpy
+    import pandas
+    meta_path = EXPECTED_DIR / "snapshot_meta.json"
+    if not meta_path.is_file():
+        pytest.skip("snapshot_meta.json missing — old-style snapshot")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    drift = []
+    if meta.get("numpy") != numpy.__version__:
+        drift.append("numpy {0} (snapshot) vs {1} (current)".format(
+            meta.get("numpy"), numpy.__version__))
+    if meta.get("pandas") != pandas.__version__:
+        drift.append("pandas {0} (snapshot) vs {1} (current)".format(
+            meta.get("pandas"), pandas.__version__))
+    assert not drift, (
+        "Environment drift — golden byte comparison is not meaningful: "
+        "{0}. Either switch to the canonical env (see README 环境) or "
+        "intentionally regenerate via scripts/dev_make_stage1_golden.py "
+        "and review the diff.".format("; ".join(drift)))
 
 
 def _strip_created_at(text):

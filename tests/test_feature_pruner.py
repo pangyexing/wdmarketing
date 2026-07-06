@@ -340,3 +340,40 @@ def test_legacy_path_when_candidate_count_unset(tmp_path):
     }
     out = maybe_prune_to_final(data, cfg_legacy, run_dir=tmp_path)
     assert out is data
+
+
+def test_funnel_is_opt_in_via_stage2_candidate_count(tmp_path):
+    """The documented contract: without training.stage2_candidate_count the
+    funnel NEVER fires — even when the loaded pool exceeds
+    final_feature_count (the xc line trains its 350-feature pool as-is
+    unless the funnel is explicitly enabled)."""
+    n_base = 30
+    base = ["f{0}".format(i) for i in range(n_base)]
+    data = _make_signal_data(500, base, signal_idx=[0, 1], seed=2)
+    cfg = _cfg(final_n=8, candidate_n=None)  # pool 30 > final 8, funnel off
+
+    out = maybe_prune_to_final(data, cfg, run_dir=tmp_path)
+
+    assert out is data
+    assert len(out.base_feature_list) == n_base
+    assert not (tmp_path / "exploratory_importance.csv").exists()
+
+
+def test_funnel_slices_calibration_matrix_too(tmp_path):
+    pytest.importorskip("xgboost")
+    import dataclasses
+    n_base = 20
+    base = ["f{0}".format(i) for i in range(n_base)]
+    data = _make_signal_data(1000, base, signal_idx=[0, 1, 2], seed=3)
+    rng = np.random.RandomState(0)
+    data = dataclasses.replace(
+        data,
+        X_calib=rng.normal(size=(50, n_base)).astype(np.float32),
+        y_calib=rng.randint(0, 2, size=50).astype(np.int64))
+    cfg = _cfg(final_n=6, candidate_n=n_base)
+
+    out = maybe_prune_to_final(data, cfg, run_dir=tmp_path)
+
+    assert out.X_train.shape[1] == 6
+    assert out.X_calib is not None
+    assert out.X_calib.shape == (50, 6)

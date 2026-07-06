@@ -60,12 +60,16 @@ def _gain_vector(booster, feature_list, importance_type):
 
 
 def run_null_importance(cfg, base_version=None, out_version=None,
-                        n_actual_runs=None, n_null_runs=None, seed=None):
+                        n_actual_runs=None, n_null_runs=None, seed=None,
+                        data=None):
     """Run the screen and materialize:
       * report/null_importance.csv            — per-feature gains + verdict
       * selected_features/<out_version>.txt   — kept features, parent=base
       * analysis/null_importance_meta.json    — parameters for reproducibility
     Returns a summary dict.
+
+    data: optionally pass an already-built StageTwoData for base_version to
+    skip the full CSV reload (callers that just built the same dataset).
     """
     try:
         import xgboost as xgb
@@ -101,7 +105,8 @@ def run_null_importance(cfg, base_version=None, out_version=None,
         cfg["training"]["final_feature_count"])
 
     t0 = time.time()
-    data = build_dataset(cfg, version=base_version)
+    if data is None:
+        data = build_dataset(cfg, version=base_version)
     X = data.X_train
     y = data.y_train
     feature_list = list(data.feature_list)

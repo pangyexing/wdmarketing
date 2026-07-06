@@ -296,6 +296,10 @@ export:
 
 io:
   column_chunk_size: 50
+  # Rows read for the column-dtype probe (wdm.io.column_scanner). A column
+  # that looks int in the first N rows may still hold NaN/sentinels deeper in
+  # the file; raise this if early-rows inference misleads a product.
+  dtype_probe_rows: 10000
   # Stage-1 single-pass scan caches each column block as .npy so correlation
   # pass-2 never re-parses the CSV. Disk cost ≈ rows × features × 8 bytes;
   # point `dir` at a scratch disk for very wide datasets, or disable to fall

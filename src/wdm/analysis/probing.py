@@ -194,9 +194,10 @@ def run_probing(cfg, cache_dir, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Load cache (and verify freshness against the configured CSV)
+    # 1) Load cache (verify freshness against the configured CSV AND the
+    # product's column configuration)
     csv_path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
-    cache = load_cache(cache_dir, csv_path=csv_path)
+    cache = load_cache(cache_dir, csv_path=csv_path, cfg=cfg)
     X = cache["X"]
     y = cache["y"].astype(np.int32)
     feature_names = cache["feature_names"]

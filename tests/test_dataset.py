@@ -230,3 +230,58 @@ def test_all_na_oot_rows_do_not_raise(tmp_path):
     assert data.all_na_counts["oot"] == 3
     assert int(data.oot_all_na_mask.sum()) == 3
     assert len(data.X_oot) == 3   # retained, not dropped
+
+
+# --- calibration holdout carve ------------------------------------------------
+
+def _carve_cfg(tmp_path, versions_dir, csv_path, frac=0.5, calibration_enabled=True):
+    cfg = _make_cfg(tmp_path, versions_dir, csv_path, ratios=(0.5, 0.3, 0.2))
+    cfg["training"]["calibration_split_fraction"] = frac
+    cfg["export"] = {"calibration": {"enabled": calibration_enabled}}
+    return cfg
+
+
+def _carve_frame(n=40):
+    return pd.DataFrame({
+        "f1": np.linspace(1, 2, n),
+        "f2": np.linspace(5, 6, n),
+        "y": ([0, 1] * (n // 2)),
+        "yyyymmdd": _yyyymmdd(n),
+    })
+
+
+def test_calibration_holdout_carved_time_tail(tmp_path):
+    df = _carve_frame()
+    csv = _write_csv(tmp_path, df)
+    vd = _write_selected_features(tmp_path, ["f1", "f2"])
+    data = build_dataset(_carve_cfg(tmp_path, vd, csv), version="v1")
+
+    assert data.X_calib is not None
+    n_va, n_cal = len(data.y_valid), len(data.y_calib)
+    assert n_va >= 1 and n_cal >= 1
+    # Bookkeeping invariants at raw length.
+    assert int(data.valid_mask.sum()) == n_va
+    assert int(data.calib_mask.sum()) == n_cal
+    assert not np.any(data.valid_mask & data.calib_mask)
+    assert not np.any(data.calib_mask & data.train_mask)
+    assert not np.any(data.calib_mask & data.oot_mask)
+    # The holdout is the time-later tail of valid.
+    assert np.nanmin(data.dt_calib) >= np.nanmax(data.dt_valid)
+
+
+def test_no_carve_when_calibration_disabled(tmp_path):
+    df = _carve_frame()
+    csv = _write_csv(tmp_path, df)
+    vd = _write_selected_features(tmp_path, ["f1", "f2"])
+    data = build_dataset(
+        _carve_cfg(tmp_path, vd, csv, calibration_enabled=False), version="v1")
+    assert data.X_calib is None
+    assert int(data.calib_mask.sum()) == 0
+
+
+def test_no_carve_when_fraction_zero(tmp_path):
+    df = _carve_frame()
+    csv = _write_csv(tmp_path, df)
+    vd = _write_selected_features(tmp_path, ["f1", "f2"])
+    data = build_dataset(_carve_cfg(tmp_path, vd, csv, frac=0), version="v1")
+    assert data.X_calib is None

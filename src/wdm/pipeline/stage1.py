@@ -390,8 +390,15 @@ def run_stage1(cfg):
                     threshold=corr_threshold, min_overlap_frac=min_overlap,
                     mmap=bool(scan_cache_cfg.get("mmap", True)))
             else:
-                # Fallback path: re-reads the CSV per block pair — much slower,
-                # but needs no scratch disk.
+                # Fallback path: re-reads the CSV per block pair — needs no
+                # scratch disk but the cost is quadratic in chunk count.
+                n_pair_parses = n_chunks * (n_chunks + 1) // 2
+                logger.warning(
+                    "scan_cache disabled — correlation pass-2 will re-parse "
+                    "the full CSV ~%d times (%d chunks, one parse per block "
+                    "pair). Enable io.scan_cache to bring this down to zero "
+                    "extra parses at ~rows×features×8 bytes of scratch disk.",
+                    n_pair_parses, n_chunks)
                 edges = correlation.compute_correlation_edges(
                     features, path, always=[label_col],
                     spec_map=spec_map, get_spec_fn=get_spec,

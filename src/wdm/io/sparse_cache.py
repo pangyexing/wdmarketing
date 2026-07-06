@@ -148,8 +148,15 @@ def build_sparse_cache(csv_path, out_dir, cfg, chunk_rows=50_000):
     return meta
 
 
-def load_cache(cache_dir, csv_path=None):
-    """Load cache; optionally verify CSV size+mtime against manifest."""
+def load_cache(cache_dir, csv_path=None, cfg=None):
+    """Load cache; optionally verify freshness against the manifest.
+
+    csv_path: verify CSV size+mtime (content staleness).
+    cfg: verify the product's column configuration (label / time / id /
+    treatment columns) against what the cache was serialized with — a YAML
+    column change silently reshapes the feature set even when the CSV file
+    itself is unchanged, so size+mtime alone would miss it.
+    """
     cache_dir = Path(cache_dir)
     meta_path = cache_dir / "manifest.json"
     if not meta_path.is_file():
@@ -157,6 +164,27 @@ def load_cache(cache_dir, csv_path=None):
             "Cache manifest missing at {0}. Run "
             "scripts/build_sparse_cache.py --product <name> first.".format(meta_path))
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    if cfg is not None:
+        data_cfg = cfg.get("data") or {}
+        expected = {
+            "label_column": data_cfg.get("label_column"),
+            "time_column": data_cfg.get("time_column"),
+            "id_columns": list(data_cfg.get("id_columns") or []),
+            "treatment_column": data_cfg.get("treatment_column"),
+        }
+        actual = {k: (list(meta.get(k) or []) if k == "id_columns"
+                      else meta.get(k)) for k in expected}
+        mismatched = [k for k in expected if expected[k] != actual[k]]
+        if mismatched:
+            raise RuntimeError(
+                "Cache stale: the product's column config changed since the "
+                "cache was built ({0}: cache={1!r} vs config={2!r}). The "
+                "serialized feature set no longer matches — rebuild with "
+                "scripts/build_sparse_cache.py --product <name>.".format(
+                    ", ".join(mismatched),
+                    {k: actual[k] for k in mismatched},
+                    {k: expected[k] for k in mismatched}))
 
     if csv_path is not None:
         st = Path(csv_path).stat()

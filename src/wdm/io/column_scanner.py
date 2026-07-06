@@ -23,8 +23,17 @@ from wdm.utils.paths import analysis_dir, ensure_dirs
 logger = logging.getLogger(__name__)
 
 
-def scan_columns(cfg, sample_rows=10000):
-    """Read header + sample_rows, probe dtypes, write column_index.json."""
+def scan_columns(cfg, sample_rows=None):
+    """Read header + sample_rows, probe dtypes, write column_index.json.
+
+    sample_rows defaults to io.dtype_probe_rows (10000). The probe is a
+    heuristic: a column that looks int in the first N rows may hold NaN or
+    sentinels deeper in the file (pandas then reads it as float per chunk).
+    Raise io.dtype_probe_rows if early-rows dtype inference misleads a
+    product; downstream numeric handling treats everything as float64.
+    """
+    if sample_rows is None:
+        sample_rows = int((cfg.get("io") or {}).get("dtype_probe_rows", 10000))
     path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
     if not path.is_file():
         raise FileNotFoundError("data.train_path not found: {0}".format(path))
