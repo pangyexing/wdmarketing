@@ -74,7 +74,7 @@ def run_null_importance(cfg, base_version=None, out_version=None,
             "xgboost is not available in this Python environment — run the "
             "model screen with the ML conda env (see scripts/run_model_screen.py).")
 
-    from wdm.analysis.selector import _report_hash, _write_auto_features_txt
+    from wdm.pipeline.stage1 import _report_hash, _write_auto_features_txt
     from wdm.model.dataset import build_dataset
     from wdm.utils.paths import (
         analysis_dir, ensure_dirs, inject_cn_column, load_column_mapping,

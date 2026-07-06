@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wdm.config import load_config
-from wdm.analysis.selector import run_stage1
+from wdm.pipeline.stage1 import run_stage1
 from wdm.utils.logging import setup_logging
 from wdm.utils.paths import ensure_dirs, report_dir
 

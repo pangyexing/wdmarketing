@@ -31,7 +31,7 @@ def strip_created_at(text):
 
 
 def main():
-    from wdm.analysis.selector import run_stage1
+    from wdm.pipeline.stage1 import run_stage1
     from wdm.utils.paths import report_dir, selected_features_dir
 
     tmp = Path(tempfile.mkdtemp(prefix="stage1_golden_"))
