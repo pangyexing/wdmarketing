@@ -26,7 +26,17 @@ def parse_families(features, cfg):
     """Parse feature list for time-window membership.
 
     Returns DataFrame[feature, family_base, window, window_rank].
+
+    When feature_groups.enable_window_family is False (e.g. datasets whose
+    features are plain numeric IDs with no time-window suffix), every feature
+    is treated as its own singleton family — no name-based clustering.
     """
+    if not cfg["feature_groups"].get("enable_window_family", True):
+        return pd.DataFrame([
+            {"feature": f, "family_base": f, "window": None, "window_rank": None}
+            for f in features
+        ])
+
     pattern = cfg["feature_groups"]["window_pattern"]
     order = cfg["feature_groups"]["window_order"]
     rank_map = {w: i for i, w in enumerate(order)}

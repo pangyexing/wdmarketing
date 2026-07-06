@@ -1,0 +1,18 @@
+{
+  "python": "3.8.20",
+  "numpy": "1.24.4",
+  "pandas": "2.0.3",
+  "dataset_seed": 20260611,
+  "n_rows": 20000,
+  "files": [
+    "correlation_edges.csv",
+    "families.csv",
+    "iv_woe.csv",
+    "lift.csv",
+    "missing.csv",
+    "psi.csv",
+    "semantic_groups.csv",
+    "summary.csv",
+    "v1_auto.txt"
+  ]
+}

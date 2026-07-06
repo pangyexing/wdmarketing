@@ -21,6 +21,7 @@ from wdm.model.tuner import run_hyperopt
 from wdm.plots.model_plots import make_all_model_plots
 from wdm.utils.logging import setup_logging
 from wdm.utils.paths import model_run_dir
+from wdm.utils.progress import StageProgress
 
 
 def main():
@@ -40,46 +41,60 @@ def main():
     run_dir = model_run_dir(cfg, args.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    prog = StageProgress("Stage 2", total=6)
+
     # 1. Dataset
-    data = build_dataset(cfg, version=version)
+    with prog.step("build dataset (features {0})".format(version)):
+        data = build_dataset(cfg, version=version)
 
     # 2. Hyperopt
-    trials_path = run_dir / "trials.pkl"
-    best_params, best_loss, trials = run_hyperopt(
-        data.X_train, data.y_train, cfg,
-        trials_path=str(trials_path),
-        max_evals=args.max_evals,
-    )
+    with prog.step("hyperopt search"):
+        trials_path = run_dir / "trials.pkl"
+        best_params, best_loss, trials = run_hyperopt(
+            data.X_train, data.y_train, cfg,
+            trials_path=str(trials_path),
+            max_evals=args.max_evals,
+            dt_train=data.dt_train,
+            w_train=data.w_train,
+        )
 
-    # 3. Final train (early stopping on valid)
-    booster, evals_result = train_final(
-        best_params, data.X_train, data.y_train,
-        data.X_valid, data.y_valid, cfg)
+    # 3. Final train (early stopping on valid; weights enter the loss only)
+    with prog.step("final train"):
+        booster, evals_result = train_final(
+            best_params, data.X_train, data.y_train,
+            data.X_valid, data.y_valid, cfg, w_tr=data.w_train)
 
     # 4. Evaluate
-    metrics_df, binned, scores, imp_df = evaluate_all(booster, data, cfg)
-    audit_df = family_importance_audit(imp_df, cfg)
-    manifest_stub = {"evals_train_history": evals_result}
-    write_metrics_artifacts(run_dir, metrics_df, binned, imp_df, audit_df,
-                             manifest_stub, best_params)
+    with prog.step("evaluate + metrics artifacts"):
+        metrics_df, binned, scores, imp_df = evaluate_all(booster, data, cfg)
+        audit_df = family_importance_audit(imp_df, cfg)
+        manifest_stub = {"evals_train_history": evals_result}
+        write_metrics_artifacts(run_dir, metrics_df, binned, imp_df, audit_df,
+                                 manifest_stub, best_params)
 
     # 5. Plots
-    make_all_model_plots(cfg, booster, data, scores, binned, imp_df,
-                         out_dir=run_dir / "plots")
+    with prog.step("model plots"):
+        make_all_model_plots(cfg, booster, data, scores, binned, imp_df,
+                             out_dir=run_dir / "plots")
 
     # 6. Export deploy bundle
-    bundle = export_bundle(
-        cfg, data, booster, evals_result, best_params, best_loss,
-        selected_features_version=version, run_id=args.run_id,
-    )
+    with prog.step("export deploy bundle"):
+        bundle = export_bundle(
+            cfg, data, booster, evals_result, best_params, best_loss,
+            selected_features_version=version, run_id=args.run_id,
+            scores=scores,
+        )
 
+    prog.finish()
+
+    objective = cfg["training"].get("tuner_objective", "aucpr")
     print()
     print("=" * 60)
     print("Stage 2 complete.")
     print("  run_id              :", args.run_id)
     print("  features version    :", version)
     print("  run dir             :", run_dir)
-    print("  best CV PR-AUC      :", round(-best_loss, 4))
+    print("  best CV {0:<12}:".format(objective), round(-best_loss, 4))
     print()
     print("Metrics:")
     print(metrics_df.to_string(index=False))

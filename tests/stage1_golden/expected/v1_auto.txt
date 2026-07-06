@@ -1,0 +1,11 @@
+# Auto-generated feature list
+# parent: null
+# report_hash: c57c74e33836
+# feature_count: 5
+# source: analysis/selector.py
+
+amt_all
+bureau_query_cnt
+dup_b
+cnt_90d
+cnt_all

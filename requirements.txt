@@ -1,6 +1,6 @@
-# Python 3.6 locked versions — see implementation-plan.md § Python 3.6 Compatibility
-xgboost==1.5.2
-shap<0.42           # 0.41.0 happens to work on 3.6
+# Python 3.7 locked versions — see implementation-plan.md § Python 3.7 Compatibility
+xgboost==1.5.0
+shap<0.42           # 0.41.0 happens to work on 3.7
 hyperopt<0.2.7
 py4j                # transitive for hyperopt.spark import guard
 numpy<1.20
@@ -10,6 +10,6 @@ matplotlib<3.4
 seaborn<0.12
 pyyaml
 jsonschema<4
-dataclasses         # 3.6 backport
-pytest
+# dataclasses — stdlib since Python 3.7, no backport needed
+pytest<7            # last line pinned to 3.7-compatible; used by tests/ + verify script
 # openpyxl intentionally omitted — target machine may lack it; report falls back to CSV + HTML

@@ -8,7 +8,7 @@ added here (not in Stage 1) to avoid double-counting signal in analysis.
 import dataclasses
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,14 @@ class StageTwoData:
     train_mask: np.ndarray
     valid_mask: np.ndarray
     oot_mask: np.ndarray
+    # Per-row yyyymmdd (float64, NaN allowed) per split; None without a time column.
+    dt_train: Optional[np.ndarray] = None
+    dt_valid: Optional[np.ndarray] = None
+    dt_oot: Optional[np.ndarray] = None
+    # Per-row training-loss weights per split; None unless training.sample_weight is set.
+    w_train: Optional[np.ndarray] = None
+    w_valid: Optional[np.ndarray] = None
+    w_oot: Optional[np.ndarray] = None
 
 
 def _load_selected_features(cfg, version=None):
@@ -56,6 +64,38 @@ def _load_selected_features(cfg, version=None):
     if not feats:
         raise ValueError("Empty selected features file: {0}".format(p))
     return feats, p
+
+
+def build_sample_weights(series, sw_cfg):
+    """Map a raw column to per-row weights via training.sample_weight.
+
+    Numeric equality match against mapping keys; NaN and unmapped values get
+    `default` (1.0 when omitted). Returns a float64 array.
+    """
+    default = float(sw_cfg.get("default", 1.0))
+    num = pd.to_numeric(pd.Series(series), errors="coerce")
+    w = np.full(num.size, default, dtype=np.float64)
+    for key, weight in sw_cfg["mapping"].items():
+        try:
+            kf = float(key)
+        except (TypeError, ValueError):
+            raise ValueError("sample_weight.mapping key {0!r} is not numeric".format(key))
+        w[(num == kf).values] = float(weight)
+    return w
+
+
+def _exclude_mask(df, exclude_rows):
+    """Boolean mask of rows KEPT after applying data.exclude_rows rules."""
+    keep = np.ones(len(df), dtype=bool)
+    for rule in exclude_rows:
+        col = rule["column"]
+        vals = [float(v) for v in rule["values"]]
+        num = pd.to_numeric(df[col], errors="coerce")
+        drop = num.isin(vals).values
+        keep &= ~drop
+        logger.info("exclude_rows: %s in %s drops %d rows", col, rule["values"],
+                    int(drop.sum()))
+    return keep
 
 
 def _split_masks(df, cfg):
@@ -83,10 +123,30 @@ def build_dataset(cfg, version=None):
     path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
     label_col = cfg["data"]["label_column"]
     time_col = cfg["data"].get("time_column")
-    needed = list(dict.fromkeys(feats + [label_col] + ([time_col] if time_col else [])))
+    sw_cfg = cfg["training"].get("sample_weight")
+    exclude_rows = cfg["data"].get("exclude_rows") or []
+    extra_cols = ([sw_cfg["column"]] if sw_cfg else []) + [r["column"] for r in exclude_rows]
+    needed = list(dict.fromkeys(feats + [label_col]
+                                + ([time_col] if time_col else []) + extra_cols))
     df = pd.read_csv(path, usecols=needed)
+    n_raw = len(df)
 
-    m_tr, m_va, m_oot = _split_masks(df, cfg)
+    if exclude_rows:
+        included = _exclude_mask(df, exclude_rows)
+        # Split on the surviving rows only, then scatter the masks back to
+        # full-CSV length: exporter indexes the raw CSV with these masks, so
+        # excluded rows must be False in all three.
+        sub_tr, sub_va, sub_oot = _split_masks(df[included].reset_index(drop=True), cfg)
+        inc_idx = np.where(included)[0]
+        m_tr = np.zeros(n_raw, dtype=bool)
+        m_va = np.zeros(n_raw, dtype=bool)
+        m_oot = np.zeros(n_raw, dtype=bool)
+        m_tr[inc_idx[np.asarray(sub_tr)]] = True
+        m_va[inc_idx[np.asarray(sub_va)]] = True
+        m_oot[inc_idx[np.asarray(sub_oot)]] = True
+        logger.info("exclude_rows kept %d / %d rows", int(included.sum()), n_raw)
+    else:
+        m_tr, m_va, m_oot = _split_masks(df, cfg)
     logger.info("Split sizes: train=%d valid=%d oot=%d",
                 int(m_tr.sum()), int(m_va.sum()), int(m_oot.sum()))
 
@@ -134,6 +194,22 @@ def build_dataset(cfg, version=None):
     y_va = y_all[m_va]
     y_oot = y_all[m_oot]
 
+    dt_tr = dt_va = dt_oot = None
+    if time_col:
+        dt_all = pd.to_numeric(
+            df[time_col].astype(str).str.replace("-", "", regex=False)
+            if not pd.api.types.is_numeric_dtype(df[time_col]) else df[time_col],
+            errors="coerce").values.astype(np.float64)
+        dt_tr, dt_va, dt_oot = dt_all[m_tr], dt_all[m_va], dt_all[m_oot]
+
+    w_tr = w_va = w_oot = None
+    if sw_cfg:
+        w_all = build_sample_weights(df[sw_cfg["column"]], sw_cfg)
+        w_tr, w_va, w_oot = w_all[m_tr], w_all[m_va], w_all[m_oot]
+        logger.info("sample_weight on %s: train weight sum=%.1f (n=%d), distinct weights=%s",
+                    sw_cfg["column"], float(w_tr.sum()), w_tr.size,
+                    sorted(set(np.unique(w_tr).tolist())))
+
     feat_order = list(feats) + indicator_feats
 
     return StageTwoData(
@@ -149,4 +225,6 @@ def build_dataset(cfg, version=None):
         train_mask=np.asarray(m_tr),
         valid_mask=np.asarray(m_va),
         oot_mask=np.asarray(m_oot),
+        dt_train=dt_tr, dt_valid=dt_va, dt_oot=dt_oot,
+        w_train=w_tr, w_valid=w_va, w_oot=w_oot,
     )

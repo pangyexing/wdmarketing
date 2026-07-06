@@ -1,0 +1,65 @@
+name: xc_resp_finish
+
+# RESPONSE model (响应). Target: is_finish_task (完成任务), modeled on the FULL
+# population. Table built by scripts/build_xc_dataset.py (data/xc_full.csv =
+# all joined rows).
+# NOTE: is_reg is analysis-only (an intermediate outcome, never modeled); it
+# and the downstream credit outcomes (is_credit_succ / is_credit_1v1 / raw
+# credit_1v1) are parked in id_columns to prevent leakage. Pairs with the two
+# qualification versions (xc_qual_finish / xc_qual_finish_1v1); the fused
+# score (resp x qual) is evaluated on the FULL analysis funnel by
+# run_funnel_eval.py.
+
+data:
+  train_path: data/xc_full.csv
+  oot_path: null
+  time_column: dt                  # int yyyymmdd(特征/标签文件时间列均为 dt,合表时归一化)
+  time_format: yyyymmdd
+  label_column: is_finish_task
+  # id is the join key; the other outcomes are excluded from features here.
+  id_columns: [id, is_reg, is_credit_succ, is_credit_1v1, credit_1v1]
+  treatment_column: null
+
+missing:
+  global:
+    sentinels: []
+    treat_negative_as_missing: false
+    treat_empty_as_missing: true
+    fill_strategy: keep_nan          # NA 不填充,直接保留 NaN 交给 XGBoost
+    generate_missing_indicator: false
+
+selected_features:
+  active_version: v1_auto
+  versions_dir: artifacts/xc_resp_finish/selected_features
+
+feature_groups:
+  enable_window_family: false
+  semantic_groups: []
+
+training_overrides:
+  final_feature_count: 200
+  hyperopt_max_evals: 30
+  tuner_objective: precision_at_k   # select hyperparams on P@10%, not full-curve PR-AUC
+  cv_strategy: time_forward         # forward-chaining CV matching the time split
+  split:
+    strategy: time
+    ratios: [0.70, 0.15, 0.15]
+
+analysis_overrides:
+  # 1000 维原始 → Stage-1 统计粗筛保留 ≤350 (v1_auto) → Stage-1.5 模型精筛 ≤200 (v2_model)
+  stage1_top_n: 350
+  null_importance:
+    enabled: true                   # Stage-1.5:run_analysis.py 自动执行(需 env_ml/xgboost)
+  iv_min: 0.01
+  lift_keep_min: 1.2
+  rank_weights:
+    iv: 1.0
+    lift: 1.5
+    gini: 0.5
+    concentration: 0.5
+    psi: 0.5
+    missing_penalty: 0.1
+    missing_penalty_threshold: 0.7
+
+export_overrides:
+  model_format: ["json", "bin"]

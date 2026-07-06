@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from wdm.utils.paths import analysis_dir, cn, ensure_dirs, load_column_mapping, per_family_dir, per_feature_dir, report_dir
+from wdm.utils.progress import track
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,8 @@ def run_per_feature_plots(cfg, bin_specs):
     m_a = ~m_e
 
     generated = []
-    for _, row in top.iterrows():
+    for _, row in track(top.iterrows(), total=len(top),
+                        label="per-feature plots", every=5):
         feat = row["feature"]
         spec = get_spec(spec_map, feat)
         arr, mask = to_nan_array(raw[feat], spec)

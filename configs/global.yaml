@@ -7,6 +7,9 @@ feature_groups:
     max_per_family: 2
     prefer: best_iv              # best_iv | shortest | longest
     corr_cutoff_in_family: 0.90
+  # Toggle the time-window (name-based) family clustering. Set false for datasets
+  # whose features are plain numeric IDs with no time-window suffix (e.g. xc).
+  enable_window_family: true
   # (B) Semantic groups: manually declared in product YAML. Empty here.
   semantic_groups: []
   # (C) Plain numerical correlation is handled by analysis/correlation.py union-find.
@@ -31,6 +34,52 @@ analysis:
   n_bins: 10
   binning: equal_freq            # equal_freq | tree
   per_feature_plot_top_n: 50
+  # Short-window features (by window suffix) get a softer missing-rate cap:
+  # "business didn't happen in the window" ≠ "data quality problem".
+  short_windows: [7d, 30d]
+  short_window_missing_rate_max: 0.98
+  # PSI flag column thresholds (stable < shift < broken). Independent from
+  # psi_cutoff (the hard filter) so products tuning psi_cutoff don't silently
+  # change the flag labels.
+  psi_flag_thresholds:
+    shift: 0.10
+    broken: 0.25
+  # Correlation edges whose pairwise-complete overlap fraction is below this
+  # are marked low_overlap and ignored by the selector's clustering.
+  corr_min_overlap_frac: 0.10
+  # Stage-1 v1_auto truncation cap; null -> fall back to
+  # training.final_feature_count (legacy behavior). When the Stage-1.5 model
+  # screen is enabled, set this LARGER than final_feature_count so the screen
+  # has a real candidate pool to select from.
+  stage1_top_n: null
+  # Optional Stage-1.5 model-based screen (target-permutation null importance).
+  # Off by default; run via scripts/run_model_screen.py (needs xgboost) or
+  # scripts/run_analysis.py --model-screen. Writes selected_features/<out_version>.txt
+  # derived from the Stage-1 v1_auto list.
+  null_importance:
+    enabled: false
+    n_actual_runs: 3             # real-label trainings averaged into actual gain
+    n_null_runs: 30              # shuffled-label trainings forming the null distribution
+    n_boost_rounds: 100
+    keep_percentile: 75          # keep features whose actual gain > null percentile
+    importance_type: gain
+    max_features: null           # null -> training.final_feature_count
+    out_version: v2_model
+    xgb_params: {}               # overrides on top of training.xgb_base_params
+  # Positive-oriented soft gate: when set, a feature with iv < iv_min is still
+  # kept if its lift_at_k >= lift_keep_min (avoids dropping strong positive
+  # rankers with weak IV). null = disabled (legacy behavior).
+  lift_keep_min: null
+  # Weights for the auto-keep rank_score. Defaults reproduce the legacy formula
+  # exactly: z(iv) + z(lift) + z(gini) - z(psi) - 0.5*1[missing_rate > 0.5].
+  rank_weights:
+    iv: 1.0
+    lift: 1.0
+    gini: 1.0
+    concentration: 0.0
+    psi: 1.0
+    missing_penalty: 0.5
+    missing_penalty_threshold: 0.5
 
 training:
   top_k_pct: 0.10
@@ -39,6 +88,18 @@ training:
   cv_folds: 5
   random_seed: 42
   eval_metrics: ["aucpr", "auc"]
+  # Hyperopt selection metric: aucpr (full-curve, legacy) or precision_at_k
+  # (custom feval at training.top_k_pct — matches the top-K deployment goal).
+  tuner_objective: aucpr
+  # CV fold construction for hyperopt: stratified (shuffled, legacy) or
+  # time_forward (forward-chaining expanding-window folds on data.time_column —
+  # use when split.strategy is time so tuning matches the deployment split).
+  cv_strategy: stratified
+  # Optional per-row training weights, e.g. business-value tiers:
+  #   sample_weight: {column: credit_1v1, mapping: {3: 6.58, 2: 2.42, 1: 1.0}, default: 1.0}
+  # Weights enter the training loss only; tuner selection (precision_at_k feval),
+  # early stopping and all reported metrics stay unweighted (per-person).
+  sample_weight: null
   xgb_base_params:
     objective: "binary:logistic"
     tree_method: "hist"
@@ -49,9 +110,32 @@ training:
 
 export:
   validation_sample_count: 100
+  # Booster serialization formats to emit. json -> booster.json (text, readable),
+  # bin/binary -> booster.bin (xgboost native binary). ubj -> booster.ubj (needs
+  # xgboost >= 1.6). predict.py auto-detects whichever file is present.
+  model_format: ["json"]
+  # Per-model isotonic score calibration fit on the VALID split, exported as a
+  # JSON lookup table (calibration.json) and replayed via np.interp in
+  # predict.py. predict.py's `score` column stays RAW; the calibrated value is
+  # an extra `score_calibrated` column — required when fusing scores across
+  # models (raw probabilities are distorted differently by scale_pos_weight).
+  calibration:
+    enabled: true
+    method: isotonic
+    min_valid_rows: 200    # skip calibration (with a warning) below these
+    min_valid_pos: 10
 
 io:
   column_chunk_size: 50
+  # Stage-1 single-pass scan caches each column block as .npy so correlation
+  # pass-2 never re-parses the CSV. Disk cost ≈ rows × features × 8 bytes;
+  # point `dir` at a scratch disk for very wide datasets, or disable to fall
+  # back to the (much slower) CSV-rereading correlation path.
+  scan_cache:
+    enabled: true
+    dir: null                    # null -> artifacts/<product>/analysis/scan_cache/
+    keep: false                  # keep cache dir after the run (debugging)
+    mmap: true                   # np.load(mmap_mode='r') in pass-2 to cap peak memory
 
 plots:
   dpi: 120

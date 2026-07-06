@@ -10,13 +10,17 @@ Auto-keep rule (the feature passes into v1_auto.txt):
     AND missing_rate < missing_rate_max_for_window
     AND iv >= iv_min
 
-missing_rate_max_for_window: short-window features (7d/30d) get 0.98 cap
-instead of the global 0.95, since "business didn't happen" ≠ "data quality".
+missing_rate_max_for_window: short-window features (analysis.short_windows,
+default 7d/30d) get the softer analysis.short_window_missing_rate_max cap
+(default 0.98) instead of the global missing_rate_max, since "business didn't
+happen in the window" ≠ "data quality".
 """
 import datetime
 import hashlib
 import json
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -37,10 +41,9 @@ from wdm.utils.paths import (
     analysis_dir, ensure_dirs, inject_cn_column,
     load_column_mapping, report_dir, selected_features_dir,
 )
+from wdm.utils.progress import StageProgress
 
 logger = logging.getLogger(__name__)
-
-_SHORT_WINDOWS = {"7d", "30d"}
 
 
 def _zscore(s):
@@ -65,7 +68,7 @@ def _build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic
 
     df = df.fillna({
         "iv": 0.0, "psi": 0.0, "lift_at_k": 1.0, "gini": 0.0,
-        "missing_rate": 0.0, "n_unique": 0,
+        "concentration": 0.0, "missing_rate": 0.0, "n_unique": 0,
     })
     return df
 
@@ -74,69 +77,111 @@ def _apply_hard_filters(df, cfg):
     miss_max = float(cfg["analysis"]["missing_rate_max"])
     iv_min = float(cfg["analysis"]["iv_min"])
     psi_cutoff = float(cfg["analysis"]["psi_cutoff"])
+    lift_keep_min = cfg["analysis"].get("lift_keep_min")
+    lift_keep_min = float(lift_keep_min) if lift_keep_min is not None else None
+    short_windows = set(cfg["analysis"].get("short_windows") or ["7d", "30d"])
+    short_cap = float(cfg["analysis"].get("short_window_missing_rate_max", 0.98))
+
+    if "window" in df.columns:
+        is_short = df["window"].isin(short_windows).values
+    else:
+        is_short = np.zeros(len(df), dtype=bool)
+    mr_cap = np.where(is_short, max(miss_max, short_cap), miss_max)
+
+    # NaN comparisons are False, matching the legacy per-row behavior.
+    with np.errstate(invalid="ignore"):
+        constant = df["n_unique"].values <= 1
+        high_missing = df["missing_rate"].values > mr_cap
+        low_iv = df["iv"].values < iv_min
+        if lift_keep_min is not None:
+            # Positive-oriented soft gate: keep a weak-IV feature if it still
+            # ranks positives well (lift_at_k >= lift_keep_min).
+            if "lift_at_k" in df.columns:
+                lift_vals = df["lift_at_k"].astype(float).values
+            else:
+                lift_vals = np.zeros(len(df), dtype=np.float64)
+            low_iv = low_iv & (lift_vals < lift_keep_min)
+        high_psi = df["psi"].values >= psi_cutoff
 
     reasons = []
-    for _, row in df.iterrows():
+    for c, hm, li, hp in zip(constant, high_missing, low_iv, high_psi):
         drop = []
-        mr_cap = miss_max
-        if row.get("window") in _SHORT_WINDOWS:
-            mr_cap = max(mr_cap, 0.98)
-        if row["n_unique"] <= 1:
+        if c:
             drop.append("constant")
-        if row["missing_rate"] > mr_cap:
+        if hm:
             drop.append("high_missing")
-        if row["iv"] < iv_min:
+        if li:
             drop.append("low_iv")
-        if row["psi"] >= psi_cutoff:
+        if hp:
             drop.append("high_psi")
         reasons.append(";".join(drop))
-    df = df.copy()
     df["_hard_drop"] = [bool(r) for r in reasons]
     df["_hard_drop_reason"] = reasons
     return df
 
 
-def _rank_and_auto_keep(df):
-    df = df.copy()
+def _rank_and_auto_keep(df, cfg):
+    w = (cfg.get("analysis") or {}).get("rank_weights") or {}
+    w_iv = float(w.get("iv", 1.0))
+    w_lift = float(w.get("lift", 1.0))
+    w_gini = float(w.get("gini", 1.0))
+    w_conc = float(w.get("concentration", 0.0))
+    w_psi = float(w.get("psi", 1.0))
+    w_miss = float(w.get("missing_penalty", 0.5))
+    miss_thr = float(w.get("missing_penalty_threshold", 0.5))
     df["rank_score"] = (
-        _zscore(df["iv"])
-        + _zscore(df["lift_at_k"])
-        + _zscore(df["gini"])
-        - 1.0 * _zscore(df["psi"])
-        - 0.5 * (df["missing_rate"] > 0.5).astype(float)
+        w_iv * _zscore(df["iv"])
+        + w_lift * _zscore(df["lift_at_k"])
+        + w_gini * _zscore(df["gini"])
+        + w_conc * _zscore(df["concentration"])
+        - w_psi * _zscore(df["psi"])
+        - w_miss * (df["missing_rate"] > miss_thr).astype(float)
     )
 
     # Within each correlation cluster, only the top-score survivor passes.
+    # Winner pick keeps the legacy stable sort so rank_score ties resolve to
+    # the member appearing first in the frame.
     cluster_winners = set()
+    winner_by_cid = {}
     for cid, block in df.groupby("corr_cluster"):
         if cid == -1 or len(block) <= 1:
             cluster_winners.update(block["feature"].tolist())
             continue
         best = block.sort_values("rank_score", ascending=False).iloc[0]["feature"]
         cluster_winners.add(best)
+        winner_by_cid[cid] = best
+
+    n = len(df)
+    if "family_kept" in df.columns:
+        # bool(NaN) is True in the legacy row loop → fillna(True).
+        fam_dropped = ~df["family_kept"].fillna(True).astype(bool).values
+    else:
+        fam_dropped = np.zeros(n, dtype=bool)
+    if "group_kept" in df.columns:
+        grp_dropped = ~df["group_kept"].fillna(True).astype(bool).values
+    else:
+        grp_dropped = np.zeros(n, dtype=bool)
+    not_winner = (~df["feature"].isin(cluster_winners)).values
+    hard_reasons = (df["_hard_drop_reason"].tolist()
+                    if "_hard_drop_reason" in df.columns else [None] * n)
+    cids = df["corr_cluster"].tolist()
 
     auto_keep = []
     drop_reason = []
-    for _, row in df.iterrows():
+    for k, feat_reason in enumerate(hard_reasons):
         reasons = []
-        if row.get("_hard_drop_reason"):
-            reasons.append(row["_hard_drop_reason"])
-        if not bool(row.get("family_kept", True)):
+        if feat_reason:
+            reasons.append(feat_reason)
+        if fam_dropped[k]:
             reasons.append("family_dropped_by_policy")
-        if not bool(row.get("group_kept", True)):
+        if grp_dropped[k]:
             reasons.append("group_dropped_by_policy")
-        if row["feature"] not in cluster_winners:
-            winner = "?"
-            cid = row["corr_cluster"]
-            if cid != -1:
-                winners = df[(df["corr_cluster"] == cid) &
-                             (df["feature"].isin(cluster_winners))]
-                if len(winners):
-                    winner = winners.iloc[0]["feature"]
-            reasons.append("corr_dup_of:{0}".format(winner))
-        keep = not reasons
-        auto_keep.append(bool(keep))
-        drop_reason.append(";".join([r for r in reasons if r]))
+        if not_winner[k]:
+            # A non-winner always belongs to a multi-member cluster, which
+            # always has a recorded winner.
+            reasons.append("corr_dup_of:{0}".format(winner_by_cid.get(cids[k], "?")))
+        auto_keep.append(not reasons)
+        drop_reason.append(";".join(reasons))
     df["auto_keep"] = auto_keep
     df["drop_reason"] = drop_reason
     return df.drop(columns=["_hard_drop", "_hard_drop_reason"], errors="ignore")
@@ -244,7 +289,8 @@ document.querySelectorAll('table').forEach(tbl => {
     return out_path
 
 
-def _write_auto_features_txt(df, out_path, top_n, report_hash, parent=None):
+def _write_auto_features_txt(df, out_path, top_n, report_hash, parent=None,
+                             source="analysis/selector.py"):
     auto = df[df["auto_keep"] == True].copy()
     auto = auto.sort_values("rank_score", ascending=False).head(top_n)
     header = [
@@ -253,7 +299,7 @@ def _write_auto_features_txt(df, out_path, top_n, report_hash, parent=None):
         "# parent: {0}".format(parent or "null"),
         "# report_hash: {0}".format(report_hash),
         "# feature_count: {0}".format(len(auto)),
-        "# source: analysis/selector.py",
+        "# source: {0}".format(source),
         "",
     ]
     lines = [row["feature"] for _, row in auto.iterrows()]
@@ -270,160 +316,211 @@ def _report_hash(summary_csv_path):
     return h.hexdigest()[:12]
 
 
+def _make_scan_cache_dir(cfg, scan_cache_cfg):
+    """Create a run-private cache dir for the single-pass scan's .npy blocks.
+
+    Default location is artifacts/<product>/analysis/scan_cache/scan_XXXX;
+    io.scan_cache.dir overrides the base (absolute, or repo-root relative —
+    e.g. a scratch disk for very wide datasets).
+    """
+    base = scan_cache_cfg.get("dir")
+    if base:
+        base_dir = Path(base)
+        if not base_dir.is_absolute():
+            base_dir = Path(cfg["_repo_root"]) / base_dir
+    else:
+        base_dir = analysis_dir(cfg) / "scan_cache"
+    ensure_dirs(base_dir)
+    return Path(tempfile.mkdtemp(prefix="scan_", dir=str(base_dir)))
+
+
+def _cleanup_scan_cache(cache_dir, scan_cache_cfg):
+    if cache_dir is None:
+        return
+    if bool(scan_cache_cfg.get("keep", False)):
+        logger.info("Keeping scan cache (io.scan_cache.keep=true): %s", cache_dir)
+        return
+    shutil.rmtree(str(cache_dir), ignore_errors=True)
+
+
 def run_stage1(cfg):
     """Run the full Stage-1 pipeline and materialize all artifacts.
 
     Returns a dict summarizing what was written.
     """
-    from wdm.analysis.correlation import compute_correlation_edges
-    from wdm.analysis.iv_woe import compute_iv_table
-    from wdm.analysis.lift import compute_feature_lift_table
-    from wdm.analysis.missing import compute_missing_stats
-    from wdm.analysis.psi import compute_psi_table_single_source
-    from wdm.io.chunked_reader import iter_column_chunks
+    from wdm.analysis.correlation import (
+        compute_correlation_edges, compute_edges_from_cache)
+    from wdm.analysis.feature_scan import run_feature_scan
     from wdm.io.column_scanner import scan_columns
     from wdm.preprocess.missing import build_missing_spec, get_spec
     from wdm.utils.time_utils import split_psi_halves
 
-    idx = scan_columns(cfg)
-    features = idx["features"]
-    label_col = idx["label_column"]
-    time_col = idx["time_column"]
-    path = idx["data_path"]
+    prog = StageProgress("Stage 1", total=5)
 
-    spec_map = build_missing_spec(cfg)
-    chunk_size = int(cfg["io"]["column_chunk_size"])
+    with prog.step("scan columns + load label/time"):
+        idx = scan_columns(cfg)
+        features = idx["features"]
+        label_col = idx["label_column"]
+        time_col = idx["time_column"]
+        path = idx["data_path"]
 
-    full_df = pd.read_csv(path)
-    y = full_df[label_col]
+        spec_map = build_missing_spec(cfg)
+        chunk_size = int(cfg["io"]["column_chunk_size"])
 
-    logger.info("Stage 1 starting: %d features × %d rows", len(features), len(full_df))
+        # Only the label and time columns are needed up-front; feature columns
+        # stream through the single-pass chunked scan below.
+        meta_cols = [label_col]
+        if time_col and time_col != label_col:
+            meta_cols.append(time_col)
+        meta_df = pd.read_csv(path, usecols=meta_cols)
+        y = meta_df[label_col]
 
-    # IV / WOE
-    iv_df, bin_specs = compute_iv_table(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
-        spec_map, y, features, cfg, get_spec)
+        # PSI expected/actual masks — by time when available, else random
+        # halves as a placeholder.
+        if time_col and time_col in meta_df.columns:
+            m_e, m_a = split_psi_halves(meta_df[time_col])
+        else:
+            rng = np.random.RandomState(cfg["training"]["random_seed"])
+            r = rng.rand(len(meta_df))
+            m_e, m_a = (r < 0.5), (r >= 0.5)
+            logger.warning("No time_column configured — PSI computed on random halves "
+                           "(useful only as a smoke check).")
 
-    # Missing
-    miss_df = compute_missing_stats(
-        iter_column_chunks(path, features, always=[], chunk_size=chunk_size),
-        spec_map, get_spec)
+    n_chunks = (len(features) + chunk_size - 1) // chunk_size
+    logger.info("Stage 1 starting: %d features × %d rows (%d column chunks)",
+                len(features), len(meta_df), n_chunks)
 
-    # Lift
-    lift_df = compute_feature_lift_table(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
-        spec_map, y, cfg, get_spec)
-
-    # PSI — split by time if possible else random halves as placeholder
-    if time_col and time_col in full_df.columns:
-        m_e, m_a = split_psi_halves(full_df[time_col])
-    else:
-        rng = np.random.RandomState(cfg["training"]["random_seed"])
-        r = rng.rand(len(full_df))
-        m_e, m_a = (r < 0.5), (r >= 0.5)
-        logger.warning("No time_column configured — PSI computed on random halves "
-                       "(useful only as a smoke check).")
-    psi_df = compute_psi_table_single_source(
-        iter_column_chunks(path, features, always=[label_col], chunk_size=chunk_size),
-        m_e, m_a, spec_map, cfg, get_spec)
-
-    # Correlation (global cutoff)
-    corr_threshold = float(cfg["analysis"]["corr_cutoff"])
-    edges = compute_correlation_edges(
-        features, path, always=[label_col],
-        spec_map=spec_map, get_spec_fn=get_spec,
-        chunk_size=chunk_size, threshold=corr_threshold)
-    if edges.empty:
-        logger.info("No feature pairs with |r| >= %.2f — correlation_edges.csv will "
-                    "be empty (this is expected when no features are highly "
-                    "collinear; lower analysis.corr_cutoff in the product config "
-                    "to inspect weaker correlations).", corr_threshold)
-
-    # Family + semantic groups
-    family_df = parse_families(features, cfg)
-    semantic_df, missing_by_group = parse_semantic_groups(features, cfg)
-
-    # Merge into a report base; rank within family/group; cluster
-    base = _build_ranked_report(iv_df, psi_df, lift_df, miss_df,
-                                family_df, semantic_df, cluster_map={}, cfg=cfg)
-    base = rank_within_family(base, cfg)
-    base = rank_within_semantic_group(base, cfg)
-
-    # Tighten correlation edges inside family/semantic groups
-    edges_tight = apply_group_correlation(edges, family_df, semantic_df, cfg)
-    clusters = cluster_correlated(edges_tight, features)
-    cmap = cluster_id_per_feature(clusters)
-    base["corr_cluster"] = base["feature"].map(cmap).fillna(-1).astype(int)
-
-    # Hard filters → rank_score → auto_keep → drop_reason
-    base = _apply_hard_filters(base, cfg)
-    base = _rank_and_auto_keep(base)
-
-    # Column ordering + 中文列名
-    mapping = load_column_mapping(cfg)
-    summary = _apply_column_ordering(base, mapping)
-
-    # ---- Write artifacts ----
-    rdir = report_dir(cfg)
-    ensure_dirs(rdir)
-
-    summary_path = rdir / "summary.csv"
-    summary.to_csv(summary_path, index=False)
-
-    # Per-signal CSVs, each left-joined with Chinese names
-    iv_out = inject_cn_column(iv_df, mapping)
-    iv_out.to_csv(rdir / "iv_woe.csv", index=False)
-
-    psi_out = inject_cn_column(psi_df, mapping)
-    psi_out.to_csv(rdir / "psi.csv", index=False)
-
-    lift_out = inject_cn_column(lift_df, mapping)
-    lift_out.to_csv(rdir / "lift.csv", index=False)
-
-    miss_out = inject_cn_column(miss_df, mapping)
-    miss_out.to_csv(rdir / "missing.csv", index=False)
-
-    edges_out = edges.copy() if edges is not None else pd.DataFrame()
-    if not edges_out.empty:
-        # Map Chinese on both columns
-        edges_out["f1_cn"] = edges_out["f1"].map(lambda x: mapping.get(x, x))
-        edges_out["f2_cn"] = edges_out["f2"].map(lambda x: mapping.get(x, x))
-        edges_out = edges_out[["f1", "f1_cn", "f2", "f2_cn", "r", "n_pairs", "low_overlap"]]
-    edges_out.to_csv(rdir / "correlation_edges.csv", index=False)
-
-    fam_summary = build_families_summary(summary)
-    fam_summary.to_csv(rdir / "families.csv", index=False)
-
-    sem_summary = build_semantic_groups_summary(summary, missing_by_group, cfg)
-    sem_summary.to_csv(rdir / "semantic_groups.csv", index=False)
-
-    # Optional XLSX — only if openpyxl happens to be available
+    scan_cache_cfg = (cfg.get("io") or {}).get("scan_cache") or {}
+    cache_dir = None
     try:
-        import openpyxl  # noqa: F401
-        xlsx_path = analysis_dir(cfg) / "feature_report.xlsx"
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
-            summary.to_excel(w, sheet_name="Summary", index=False)
-            iv_out.to_excel(w, sheet_name="IV_WOE", index=False)
-            psi_out.to_excel(w, sheet_name="PSI", index=False)
-            lift_out.to_excel(w, sheet_name="Lift", index=False)
-            miss_out.to_excel(w, sheet_name="Missing", index=False)
-            edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
-            fam_summary.to_excel(w, sheet_name="Families", index=False)
-            sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
-        logger.info("Wrote optional XLSX: %s", xlsx_path)
-    except Exception as e:
-        logger.info("Skipped XLSX generation: %s", e)
+        # IV / missing / lift / PSI + correlation Pass-1 stats in ONE pass
+        # over the CSV; blocks cached as .npy for Pass-2 unless disabled.
+        with prog.step("single-pass scan (IV/missing/lift/PSI + corr stats)"):
+            if bool(scan_cache_cfg.get("enabled", True)):
+                cache_dir = _make_scan_cache_dir(cfg, scan_cache_cfg)
+            scan = run_feature_scan(path, features, y, m_e, m_a,
+                                    spec_map, get_spec, cfg,
+                                    cache_dir=cache_dir)
+            iv_df = scan.iv_df
+            bin_specs = scan.bin_specs
+            miss_df = scan.miss_df
+            lift_df = scan.lift_df
+            psi_df = scan.psi_df
 
-    _write_index_html(rdir, mapping)
+        # Correlation Pass-2 (global cutoff)
+        with prog.step("correlation pass-2"):
+            corr_threshold = float(cfg["analysis"]["corr_cutoff"])
+            min_overlap = float(cfg["analysis"].get("corr_min_overlap_frac", 0.10))
+            if cache_dir is not None:
+                edges = compute_edges_from_cache(
+                    features, scan.blocks, cache_dir,
+                    scan.col_count, scan.col_sum, scan.col_sum_sq, scan.n_rows,
+                    threshold=corr_threshold, min_overlap_frac=min_overlap,
+                    mmap=bool(scan_cache_cfg.get("mmap", True)))
+            else:
+                # Fallback path: re-reads the CSV per block pair — much slower,
+                # but needs no scratch disk.
+                edges = compute_correlation_edges(
+                    features, path, always=[label_col],
+                    spec_map=spec_map, get_spec_fn=get_spec,
+                    chunk_size=chunk_size, threshold=corr_threshold,
+                    min_overlap_frac=min_overlap)
+            if edges.empty:
+                logger.info("No feature pairs with |r| >= %.2f — correlation_edges.csv will "
+                            "be empty (this is expected when no features are highly "
+                            "collinear; lower analysis.corr_cutoff in the product config "
+                            "to inspect weaker correlations).", corr_threshold)
+    finally:
+        _cleanup_scan_cache(cache_dir, scan_cache_cfg)
 
-    # v1_auto.txt
-    sf_dir = selected_features_dir(cfg)
-    ensure_dirs(sf_dir)
-    auto_path = sf_dir / "v1_auto.txt"
-    top_n = int(cfg["training"]["final_feature_count"])
-    rh = _report_hash(summary_path)
-    _write_auto_features_txt(summary, auto_path, top_n=top_n, report_hash=rh)
+    with prog.step("family/group ranking + auto-keep"):
+        # Family + semantic groups
+        family_df = parse_families(features, cfg)
+        semantic_df, missing_by_group = parse_semantic_groups(features, cfg)
 
+        # Merge into a report base; rank within family/group; cluster
+        base = _build_ranked_report(iv_df, psi_df, lift_df, miss_df,
+                                    family_df, semantic_df, cluster_map={}, cfg=cfg)
+        base = rank_within_family(base, cfg)
+        base = rank_within_semantic_group(base, cfg)
+
+        # Tighten correlation edges inside family/semantic groups
+        edges_tight = apply_group_correlation(edges, family_df, semantic_df, cfg)
+        clusters = cluster_correlated(edges_tight, features)
+        cmap = cluster_id_per_feature(clusters)
+        base["corr_cluster"] = base["feature"].map(cmap).fillna(-1).astype(int)
+
+        # Hard filters → rank_score → auto_keep → drop_reason
+        base = _apply_hard_filters(base, cfg)
+        base = _rank_and_auto_keep(base, cfg)
+
+    with prog.step("write report artifacts"):
+        # Column ordering + 中文列名
+        mapping = load_column_mapping(cfg)
+        summary = _apply_column_ordering(base, mapping)
+
+        rdir = report_dir(cfg)
+        ensure_dirs(rdir)
+
+        summary_path = rdir / "summary.csv"
+        summary.to_csv(summary_path, index=False)
+
+        # Per-signal CSVs, each left-joined with Chinese names
+        iv_out = inject_cn_column(iv_df, mapping)
+        iv_out.to_csv(rdir / "iv_woe.csv", index=False)
+
+        psi_out = inject_cn_column(psi_df, mapping)
+        psi_out.to_csv(rdir / "psi.csv", index=False)
+
+        lift_out = inject_cn_column(lift_df, mapping)
+        lift_out.to_csv(rdir / "lift.csv", index=False)
+
+        miss_out = inject_cn_column(miss_df, mapping)
+        miss_out.to_csv(rdir / "missing.csv", index=False)
+
+        edges_out = edges.copy() if edges is not None else pd.DataFrame()
+        if not edges_out.empty:
+            # Map Chinese on both columns
+            edges_out["f1_cn"] = edges_out["f1"].map(lambda x: mapping.get(x, x))
+            edges_out["f2_cn"] = edges_out["f2"].map(lambda x: mapping.get(x, x))
+            edges_out = edges_out[["f1", "f1_cn", "f2", "f2_cn", "r", "n_pairs", "low_overlap"]]
+        edges_out.to_csv(rdir / "correlation_edges.csv", index=False)
+
+        fam_summary = build_families_summary(summary)
+        fam_summary.to_csv(rdir / "families.csv", index=False)
+
+        sem_summary = build_semantic_groups_summary(summary, missing_by_group, cfg)
+        sem_summary.to_csv(rdir / "semantic_groups.csv", index=False)
+
+        # Optional XLSX — only if openpyxl happens to be available
+        try:
+            import openpyxl  # noqa: F401
+            xlsx_path = analysis_dir(cfg) / "feature_report.xlsx"
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
+                summary.to_excel(w, sheet_name="Summary", index=False)
+                iv_out.to_excel(w, sheet_name="IV_WOE", index=False)
+                psi_out.to_excel(w, sheet_name="PSI", index=False)
+                lift_out.to_excel(w, sheet_name="Lift", index=False)
+                miss_out.to_excel(w, sheet_name="Missing", index=False)
+                edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
+                fam_summary.to_excel(w, sheet_name="Families", index=False)
+                sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
+            logger.info("Wrote optional XLSX: %s", xlsx_path)
+        except Exception as e:
+            logger.info("Skipped XLSX generation: %s", e)
+
+        _write_index_html(rdir, mapping)
+
+        # v1_auto.txt
+        sf_dir = selected_features_dir(cfg)
+        ensure_dirs(sf_dir)
+        auto_path = sf_dir / "v1_auto.txt"
+        top_n = int(cfg["analysis"].get("stage1_top_n")
+                    or cfg["training"]["final_feature_count"])
+        rh = _report_hash(summary_path)
+        _write_auto_features_txt(summary, auto_path, top_n=top_n, report_hash=rh)
+
+    prog.finish()
     logger.info("Stage 1 done. Report: %s  Auto features: %s", rdir, auto_path)
 
     return {

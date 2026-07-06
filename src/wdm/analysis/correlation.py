@@ -15,8 +15,9 @@ NaN handling: pairwise complete — for each (i, j) pair, only rows where both
 columns are non-NaN contribute. We track `n_pairs` per edge so the selector
 can down-weight edges with low overlap.
 """
+import json
 import logging
-import math
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import numpy as np
@@ -48,26 +49,53 @@ def _pairwise_cov_block(A, B, muA, muB):
     B = np.asarray(B, dtype=np.float64)
     mA = ~np.isnan(A)
     mB = ~np.isnan(B)
+    # Centered values, zeroed where missing. Because missing entries are 0 in
+    # A0/B0, (A0.T @ B0)[i,j] sums (A[:,i]-muA[i])·(B[:,j]-muB[j]) over exactly
+    # the rows where both mA[:,i] and mB[:,j] are True — the per-pair mask
+    # never needs to be materialized.
     A0 = np.where(mA, A - muA[np.newaxis, :], 0.0)
     B0 = np.where(mB, B - muB[np.newaxis, :], 0.0)
-    # For pair (i,j): pairs active when both mA[:,i] and mB[:,j] are True
-    # Use masks as int for count; use masked centered values for cov sum.
     mA_i = mA.astype(np.float64)
     mB_i = mB.astype(np.float64)
     pair_counts = mA_i.T @ mB_i        # (nA, nB)
-    # To avoid bias when a row is missing on one side, zero out contributions
-    # from such rows in the dot product:
-    A_masked = np.where(mA & mB[:, :1] if False else mA, A0, 0.0)  # broadcast safe
-    # But the mask per pair is mA[:,i] & mB[:,j], which varies per pair.
-    # Correct approach: A_masked = A0 * mA, B_masked = B0 * mB → then
-    # (A_masked.T @ B_masked)[i,j] = sum over rows where both mA[:,i]=1 and
-    # mB[:,j]=1 of (A[:,i]-muA[i]) * (B[:,j]-muB[j]).
-    A_masked = A0 * mA_i
-    B_masked = B0 * mB_i
-    cov_sum = A_masked.T @ B_masked
+    cov_sum = A0.T @ B0
     with np.errstate(invalid="ignore", divide="ignore"):
         cov = np.where(pair_counts > 0, cov_sum / pair_counts, 0.0)
     return cov, pair_counts
+
+
+def finalize_column_stats(count, sum_, sum_sq):
+    """Derive per-column (mean, std) from accumulated Pass-1 statistics."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(count > 0, sum_ / count, 0.0)
+        var = np.where(count > 0, sum_sq / count - mean * mean, 0.0)
+        std = np.sqrt(np.clip(var, 0.0, None))
+    return mean, std
+
+
+def _collect_block_edges(r, pairs, blockA, blockB, same_block,
+                         threshold, total_rows, min_overlap_frac):
+    """Vectorized edge collection for one block-pair correlation matrix.
+
+    np.argwhere scans row-major, so the emitted edge order matches the
+    original i-outer / j-inner element loop exactly.
+    """
+    with np.errstate(invalid="ignore"):
+        valid = ~np.isnan(r) & (np.abs(r) >= threshold)
+    if same_block:
+        valid &= np.triu(np.ones(r.shape, dtype=bool), k=1)
+    edges = []
+    for i, j in np.argwhere(valid):
+        np_pairs = int(pairs[i, j])
+        frac = np_pairs / float(total_rows) if total_rows else 0.0
+        edges.append({
+            "f1": blockA[i],
+            "f2": blockB[j],
+            "r": float(r[i, j]),
+            "n_pairs": np_pairs,
+            "low_overlap": bool(frac < min_overlap_frac),
+        })
+    return edges
 
 
 def compute_correlation_edges(features,
@@ -88,8 +116,11 @@ def compute_correlation_edges(features,
     """
     from wdm.io.chunked_reader import iter_column_chunks
     from wdm.preprocess.missing import to_nan_array
+    from wdm.utils.progress import ProgressCounter, track
 
     features = list(features)
+    n_chunks = (len(features) + chunk_size - 1) // chunk_size
+
     # ---- Pass 1: global means + sum_sq ----
     feat_idx = {f: i for i, f in enumerate(features)}
     count = np.zeros(len(features), dtype=np.int64)
@@ -97,7 +128,9 @@ def compute_correlation_edges(features,
     sum_sq = np.zeros(len(features), dtype=np.float64)
     total_rows = None
 
-    for df_chunk, block in iter_column_chunks(path, features, always=always, chunk_size=chunk_size):
+    for df_chunk, block in track(
+            iter_column_chunks(path, features, always=always, chunk_size=chunk_size),
+            total=n_chunks, label="correlation pass1 chunks"):
         n_rows = len(df_chunk)
         if total_rows is None:
             total_rows = n_rows
@@ -114,14 +147,12 @@ def compute_correlation_edges(features,
             sum_[i] += s[j]
             sum_sq[i] += s2[j]
 
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mean = np.where(count > 0, sum_ / count, 0.0)
-        var = np.where(count > 0, sum_sq / count - mean * mean, 0.0)
-        std = np.sqrt(np.clip(var, 0.0, None))
+    mean, std = finalize_column_stats(count, sum_, sum_sq)
 
     # ---- Pass 2: block-pair covariance ----
-    n_chunks = (len(features) + chunk_size - 1) // chunk_size
     blocks = [features[i * chunk_size:(i + 1) * chunk_size] for i in range(n_chunks)]
+    pair_prog = ProgressCounter("correlation pass2 block-pairs",
+                                total=n_chunks * (n_chunks + 1) // 2)
 
     edges = []
     for bi in range(n_chunks):
@@ -130,7 +161,6 @@ def compute_correlation_edges(features,
         muA = mean[idxA]
         stdA = std[idxA]
         # Load blockA once
-        from wdm.io.chunked_reader import read_full
         always_set = list(set(always) | set(blockA))
         # Single-chunk read for efficiency; reuse pd.read_csv
         dfA = pd.read_csv(path, usecols=always_set)
@@ -164,24 +194,81 @@ def compute_correlation_edges(features,
             with np.errstate(invalid="ignore", divide="ignore"):
                 r = np.where(denom > 0, cov / denom, 0.0)
 
-            # Collect edges
-            for i in range(r.shape[0]):
-                j_start = i + 1 if bi == bj else 0
-                for j in range(j_start, r.shape[1]):
-                    rv = float(r[i, j])
-                    if math.isnan(rv):
-                        continue
-                    if abs(rv) < threshold:
-                        continue
-                    np_pairs = int(pairs[i, j])
-                    frac = np_pairs / float(total_rows) if total_rows else 0.0
-                    edges.append({
-                        "f1": blockA[i],
-                        "f2": blockB[j],
-                        "r": rv,
-                        "n_pairs": np_pairs,
-                        "low_overlap": bool(frac < min_overlap_frac),
-                    })
+            edges.extend(_collect_block_edges(
+                r, pairs, blockA, blockB, bi == bj,
+                threshold, total_rows, min_overlap_frac))
+            pair_prog.tick(extra="{0} edges so far".format(len(edges)))
+    df = pd.DataFrame(edges, columns=["f1", "f2", "r", "n_pairs", "low_overlap"])
+    if not df.empty:
+        df = df.sort_values("r", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+    return df
+
+
+def _validate_cache_manifest(cache_dir, blocks, n_rows):
+    from wdm.analysis.feature_scan import MANIFEST_NAME
+
+    manifest_path = Path(cache_dir) / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            "scan cache manifest missing: {0}".format(manifest_path))
+    with open(str(manifest_path), "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    if (manifest.get("blocks") != [list(b) for b in blocks]
+            or int(manifest.get("n_rows", -1)) != int(n_rows)):
+        raise ValueError(
+            "scan cache manifest does not match the requested feature blocks "
+            "(stale cache?): {0}".format(cache_dir))
+
+
+def compute_edges_from_cache(features, blocks, cache_dir, count, sum_, sum_sq,
+                             n_rows, threshold=0.95, min_overlap_frac=0.10,
+                             mmap=True):
+    """Correlation Pass-2 fed by the single-pass scan's .npy block cache.
+
+    Numerically identical to compute_correlation_edges: same Pass-1 statistics
+    (accumulated by feature_scan and passed in), same block-pair covariance,
+    same edge collection — only the data source differs (np.load of the cached
+    NaN-aware float64 blocks instead of re-parsing the CSV per block pair).
+    """
+    from wdm.analysis.feature_scan import block_cache_path
+    from wdm.utils.progress import ProgressCounter
+
+    features = list(features)
+    cache_dir = Path(cache_dir)
+    _validate_cache_manifest(cache_dir, blocks, n_rows)
+
+    feat_idx = {f: i for i, f in enumerate(features)}
+    mean, std = finalize_column_stats(count, sum_, sum_sq)
+    n_chunks = len(blocks)
+    mode = "r" if mmap else None
+    total_rows = int(n_rows)
+    pair_prog = ProgressCounter("correlation pass2 block-pairs (cached)",
+                                total=n_chunks * (n_chunks + 1) // 2)
+
+    edges = []
+    for bi in range(n_chunks):
+        blockA = blocks[bi]
+        idxA = np.array([feat_idx[f] for f in blockA])
+        muA = mean[idxA]
+        stdA = std[idxA]
+        A = np.load(str(block_cache_path(cache_dir, bi)), mmap_mode=mode)
+        for bj in range(bi, n_chunks):
+            blockB = blocks[bj]
+            idxB = np.array([feat_idx[f] for f in blockB])
+            muB = mean[idxB]
+            stdB = std[idxB]
+            if bi == bj:
+                B = A
+            else:
+                B = np.load(str(block_cache_path(cache_dir, bj)), mmap_mode=mode)
+            cov, pairs = _pairwise_cov_block(A, B, muA, muB)
+            denom = np.outer(stdA, stdB)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                r = np.where(denom > 0, cov / denom, 0.0)
+            edges.extend(_collect_block_edges(
+                r, pairs, blockA, blockB, bi == bj,
+                threshold, total_rows, min_overlap_frac))
+            pair_prog.tick(extra="{0} edges so far".format(len(edges)))
     df = pd.DataFrame(edges, columns=["f1", "f2", "r", "n_pairs", "low_overlap"])
     if not df.empty:
         df = df.sort_values("r", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
