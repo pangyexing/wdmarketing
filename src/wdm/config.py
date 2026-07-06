@@ -1,6 +1,13 @@
-"""Config loading: global.yaml + product YAML merged via *_overrides.
+"""Config loading: global.yaml (+ optional family) + product YAML merged via *_overrides.
 
 Public entrypoint: load_config(product_name) -> dict.
+
+Merge order: global.yaml → configs/families/<extends>.yaml (when the product
+YAML declares a top-level `extends: <name>`) → the product YAML, then the
+*_overrides sections are folded into their base sections. Families hold the
+blocks a product line shares (e.g. the five xc products) so per-product files
+carry only their differences. One level only — a family cannot extend
+another family.
 
 Search order for configs root:
 1. $WDM_CONFIG_DIR if set
@@ -268,11 +275,29 @@ def load_config(product_name: str,
     with open(product_path, "r", encoding="utf-8") as f:
         product_cfg = yaml.safe_load(f) or {}
 
-    merged = _deep_merge(global_cfg, product_cfg)
+    merged = global_cfg
+    family_name = product_cfg.pop("extends", None)
+    if family_name:
+        family_path = cfg_dir / "families" / "{0}.yaml".format(family_name)
+        if not family_path.is_file():
+            raise FileNotFoundError(
+                "Product '{0}' declares extends: {1} but {2} does not exist"
+                .format(product_name, family_name, family_path))
+        with open(family_path, "r", encoding="utf-8") as f:
+            family_cfg = yaml.safe_load(f) or {}
+        if "extends" in family_cfg:
+            raise ValueError(
+                "Family '{0}' declares extends itself — families cannot "
+                "extend other families (one level only)".format(family_name))
+        merged = _deep_merge(merged, family_cfg)
+        logger.info("Config family applied: %s (global -> %s -> %s)",
+                    family_name, family_name, product_name)
+    merged = _deep_merge(merged, product_cfg)
     resolved = _apply_overrides(merged)
 
     resolved["_configs_dir"] = str(cfg_dir)
     resolved["_repo_root"] = str(cfg_dir.parent)
+    resolved["_extends"] = family_name
     resolved.setdefault("name", product_name)
 
     _validate(resolved)

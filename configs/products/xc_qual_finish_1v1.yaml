@@ -1,4 +1,5 @@
 name: xc_qual_finish_1v1
+extends: xc_common
 
 # QUALIFICATION model V2 (资质 V2). Target: is_credit_1v1, derived at build
 # time from credit_1v1 (1/2/3 -> 正样本; 0/-1 -> 负样本), modeled on users who
@@ -9,69 +10,26 @@ name: xc_qual_finish_1v1
 # and the raw credit_1v1 must never enter features — all parked in id_columns
 # so the scanner excludes them. Pairs with xc_resp_finish (响应); fused score
 # evaluated by run_funnel_eval.py with --qual-stage is_credit_1v1.
+#
+# Shared xc settings (missing rules, screens, rank weights, training/export
+# overrides) live in configs/families/xc_common.yaml.
 
 data:
   train_path: data/xc_qual_finish.csv
-  oot_path: null
-  time_column: dt                  # int yyyymmdd(特征/标签文件时间列均为 dt,合表时归一化)
-  time_format: yyyymmdd
   label_column: is_credit_1v1
   id_columns: [id, is_reg, is_finish_task, is_credit_succ, credit_1v1]
-  treatment_column: null
   # 若业务确认 credit_1v1 == -1 是「未成熟/不可知」而非真负样本,启用下面两行
   # 将其剔除出本产品的训练视图(不影响共享同一张表的 V1 与分析漏斗):
   # exclude_rows:
   #   - {column: credit_1v1, values: [-1]}
 
-missing:
-  global:
-    sentinels: []
-    treat_negative_as_missing: false
-    treat_empty_as_missing: true
-    fill_strategy: keep_nan          # NA 不填充,直接保留 NaN 交给 XGBoost
-    generate_missing_indicator: false
-
 selected_features:
-  # v2_model = the null-importance screen's output (the xc default path);
-  # produced by run_analysis --model-screen. v1_auto trains on the raw
-  # Stage-1 pool without the screen.
-  active_version: v2_model
   versions_dir: artifacts/xc_qual_finish_1v1/selected_features
 
-feature_groups:
-  enable_window_family: false
-  semantic_groups: []
-
 training_overrides:
-  final_feature_count: 200
-  hyperopt_max_evals: 30
-  tuner_objective: precision_at_k   # select hyperparams on P@10%, not full-curve PR-AUC
-  cv_strategy: time_forward         # forward-chaining CV matching the time split
   # 档位价值加权(业务价值 3=790 / 2=290 / 1=120,按档位1归一)。权重只进训练
   # 损失;调参 P@K、早停与全部上报指标保持按人头不加权。
   sample_weight:
     column: credit_1v1              # parked in id_columns — 只用于权重,绝不进特征
     mapping: {3: 6.5833, 2: 2.4167, 1: 1.0}
     default: 1.0                    # 0 / -1 / NaN -> 1.0(负样本权重不变)
-  split:
-    strategy: time
-    ratios: [0.70, 0.15, 0.15]
-
-analysis_overrides:
-  # 1000 维原始 → Stage-1 统计粗筛保留 ≤350 (v1_auto) → Stage-1.5 模型精筛 ≤200 (v2_model)
-  stage1_top_n: 350
-  null_importance:
-    enabled: true                   # Stage-1.5:run_analysis.py 自动执行(需 env_ml/xgboost)
-  iv_min: 0.01
-  lift_keep_min: 1.2
-  rank_weights:
-    iv: 1.0
-    lift: 1.5
-    gini: 0.5
-    concentration: 0.5
-    psi: 0.5
-    missing_penalty: 0.1
-    missing_penalty_threshold: 0.7
-
-export_overrides:
-  model_format: ["json", "bin"]
