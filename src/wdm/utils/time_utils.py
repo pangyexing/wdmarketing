@@ -79,6 +79,83 @@ def split_stratified(y, ratios, seed=42):
     return mask_tr, mask_va, mask_oot
 
 
+def build_forward_chaining_folds(dt_values, n_folds, min_test_rows=50):
+    """Expanding-window CV folds for time-ordered data (hyperopt tuning).
+
+    dt_values: 1-D array of yyyymmdd ints/floats aligned to the train rows;
+    NaN allowed. Rows are partitioned into n_folds+1 contiguous time blocks of
+    roughly equal row count, but cut points are snapped to calendar-day
+    boundaries so a single day never straddles two blocks — this guarantees a
+    strict max(train_dt) < min(test_dt) for every fold. Fold i trains on
+    blocks 0..i and validates on block i+1. NaN-dt rows go to block 0 (always
+    train, never test). Test blocks smaller than min_test_rows are merged into
+    the previous block (fewer folds, with a warning).
+
+    Returns a list of (train_idx, test_idx) int64 array tuples, len <= n_folds.
+    """
+    dt = pd.to_numeric(pd.Series(dt_values), errors="coerce").values.astype(np.float64)
+    n = dt.size
+    if n_folds < 1:
+        raise ValueError("n_folds must be >= 1")
+    valid = ~np.isnan(dt)
+    if valid.sum() < 2:
+        raise ValueError("Not enough non-null dt values for time folds")
+
+    days, counts = np.unique(dt[valid], return_counts=True)
+    n_blocks = n_folds + 1
+    if days.size < n_blocks:
+        n_blocks = int(days.size)
+        logger.warning("Only %d unique days < requested %d blocks; reducing to %d folds",
+                       days.size, n_folds + 1, n_blocks - 1)
+        if n_blocks < 2:
+            raise ValueError("Need at least 2 distinct days for forward-chaining folds")
+
+    # Day-boundary cut points at ~equal cumulative row counts.
+    cum = np.cumsum(counts)
+    total = int(cum[-1])
+    targets = [int(round(total * (i + 1) / float(n_blocks))) for i in range(n_blocks - 1)]
+    cut_days = []
+    for t in targets:
+        pos = int(np.searchsorted(cum, max(1, t)))
+        pos = min(pos, days.size - 2)  # keep at least one day for the last block
+        day = days[pos]
+        if cut_days and day <= cut_days[-1]:
+            # Snap collisions forward to the next unused day.
+            nxt = int(np.searchsorted(days, cut_days[-1], side="right"))
+            if nxt >= days.size - 1:
+                continue
+            day = days[nxt]
+        cut_days.append(day)
+    # block_id per row: number of cut days strictly below the row's dt.
+    # Rows with dt <= cut_days[0] -> block 0, etc. NaN -> block 0.
+    block_id = np.zeros(n, dtype=np.int64)
+    block_id[valid] = np.searchsorted(np.asarray(cut_days), dt[valid], side="left")
+
+    folds = []
+    last_block = int(block_id.max())
+    merged_into_prev = 0
+    for b in range(1, last_block + 1):
+        test_idx = np.where(block_id == b)[0]
+        if test_idx.size < min_test_rows and folds:
+            # Merge a tiny test block into the previous fold's test set.
+            prev_train, prev_test = folds[-1]
+            folds[-1] = (prev_train, np.concatenate([prev_test, test_idx]))
+            merged_into_prev += 1
+            continue
+        train_idx = np.where((block_id < b) & valid)[0]
+        train_idx = np.concatenate([train_idx, np.where(~valid)[0]]).astype(np.int64)
+        train_idx.sort()
+        if train_idx.size == 0 or test_idx.size == 0:
+            continue
+        folds.append((train_idx, test_idx.astype(np.int64)))
+    if merged_into_prev:
+        logger.warning("Merged %d small test blocks (< %d rows) into their predecessors; "
+                       "%d folds remain", merged_into_prev, min_test_rows, len(folds))
+    if not folds:
+        raise ValueError("Could not build any forward-chaining fold")
+    return folds
+
+
 def split_psi_halves(yyyymmdd_series):
     """Split into earlier/later halves by yyyymmdd — used when oot_path is absent."""
     ints = to_yyyymmdd_int(yyyymmdd_series)

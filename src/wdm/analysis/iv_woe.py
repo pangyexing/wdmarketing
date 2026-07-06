@@ -119,6 +119,26 @@ def woe_bin(values_nan, y, feature,
     )
 
 
+def iv_row_from_array(arr, y, feat, n_bins, strategy):
+    """Per-feature kernel shared by compute_iv_table and the single-pass scan:
+    NaN-aware float array in, (report_row_dict, BinSpec) out.
+
+    Analysis always treats missing as its own bin (see module docstring) —
+    spec.treat_as_missing_in_woe is intentionally not consulted here.
+    """
+    bs = woe_bin(arr, y, feat, n_bins=n_bins, strategy=strategy,
+                 missing_as_bin=True)
+    row = {
+        "feature": feat,
+        "iv": bs.iv,
+        "n_bins": len(bs.bin_counts),
+        "monotonic": bool(bs.monotonic),
+        "missing_n": bs.missing_n,
+        "missing_woe": bs.missing_woe,
+    }
+    return row, bs
+
+
 def compute_iv_table(chunk_iter, spec_map, y_series, feature_names,
                      cfg, get_spec_fn):
     """Iterate chunks, compute BinSpec for each feature, return:
@@ -128,6 +148,8 @@ def compute_iv_table(chunk_iter, spec_map, y_series, feature_names,
     chunk_iter yields (df_chunk, block_features) from io.chunked_reader.
     y_series is the full-data label column as pandas Series aligned to the CSV.
     """
+    from wdm.preprocess.missing import to_nan_array
+
     y = y_series.values
     n_bins_cfg = int(cfg["analysis"].get("n_bins", 10))
     strategy = str(cfg["analysis"].get("binning", "equal_freq"))
@@ -145,19 +167,9 @@ def compute_iv_table(chunk_iter, spec_map, y_series, feature_names,
                 continue
             seen.add(feat)
             spec = get_spec_fn(spec_map, feat)
-            from wdm.preprocess.missing import to_nan_array
             arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
-            bs = woe_bin(arr, y, feat,
-                         n_bins=n_bins_cfg, strategy=strategy,
-                         missing_as_bin=bool(spec.treat_as_missing_in_woe) or True)
+            row, bs = iv_row_from_array(arr, y, feat, n_bins_cfg, strategy)
             bin_specs[feat] = bs
-            rows.append({
-                "feature": feat,
-                "iv": bs.iv,
-                "n_bins": len(bs.bin_counts),
-                "monotonic": bool(bs.monotonic),
-                "missing_n": bs.missing_n,
-                "missing_woe": bs.missing_woe,
-            })
+            rows.append(row)
     df = pd.DataFrame(rows).sort_values("iv", ascending=False).reset_index(drop=True)
     return df, bin_specs

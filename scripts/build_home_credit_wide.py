@@ -239,21 +239,6 @@ def main():
         logger.info("Merged %s → total columns: %d", build_fn.__name__, len(merged.columns))
 
     merged = merged.reset_index()
-
-    # Synthesize a yyyymmdd time column from SK_ID_CURR ordering.
-    # Home Credit has no absolute application timestamp — only relative DAYS_*
-    # offsets (each row's 0 = its own application day). SK_ID_CURR is a roughly
-    # monotonic application id, so we use its rank as a chronological proxy
-    # and spread rows evenly across 2022-01-01 → 2024-12-31.
-    rank = merged["SK_ID_CURR"].rank(method="first").astype(np.int64) - 1
-    span_days = (pd.Timestamp("2024-12-31") - pd.Timestamp("2022-01-01")).days
-    denom = max(1, int(rank.max()))
-    day_offset = (rank * span_days // denom).astype(np.int64)
-    dates = pd.Timestamp("2022-01-01") + pd.to_timedelta(day_offset, unit="D")
-    merged["yyyymmdd"] = dates.dt.strftime("%Y%m%d").astype(np.int64)
-    logger.info("Synthesized yyyymmdd range: %d → %d",
-                merged["yyyymmdd"].min(), merged["yyyymmdd"].max())
-
     # Downcast float64 to float32 where possible for smaller CSV
     for c in merged.select_dtypes(include=["float64"]).columns:
         merged[c] = merged[c].astype(np.float32)
@@ -263,8 +248,6 @@ def main():
     print("Done. Wide table: {0}".format(out_path))
     print("Shape: {0} rows × {1} columns".format(*merged.shape))
     print("Target pos rate: {0:.4f}".format(merged["TARGET"].mean()))
-    print("yyyymmdd range: {0} → {1}".format(
-        merged["yyyymmdd"].min(), merged["yyyymmdd"].max()))
 
 
 if __name__ == "__main__":

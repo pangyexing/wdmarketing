@@ -82,6 +82,45 @@ def _validate(cfg: Dict[str, Any]) -> None:
     if not data.get("label_column"):
         raise ValueError("data.label_column must be set")
 
+    exclude_rows = data.get("exclude_rows")
+    if exclude_rows is not None:
+        if not isinstance(exclude_rows, list):
+            raise ValueError("data.exclude_rows must be a list of {column, values} dicts")
+        for rule in exclude_rows:
+            if not isinstance(rule, dict) or not rule.get("column") \
+                    or not isinstance(rule.get("values"), list) or not rule["values"]:
+                raise ValueError(
+                    "data.exclude_rows entries must be {{column: <str>, values: [..]}}; got {0}"
+                    .format(rule))
+
+    tuner_objective = cfg["training"].get("tuner_objective", "aucpr")
+    if tuner_objective not in ("aucpr", "precision_at_k"):
+        raise ValueError("training.tuner_objective must be 'aucpr' or 'precision_at_k'")
+
+    cv_strategy = cfg["training"].get("cv_strategy", "stratified")
+    if cv_strategy not in ("stratified", "time_forward"):
+        raise ValueError("training.cv_strategy must be 'stratified' or 'time_forward'")
+    if cv_strategy == "time_forward" and not data.get("time_column"):
+        raise ValueError("training.cv_strategy='time_forward' requires data.time_column")
+
+    sw = cfg["training"].get("sample_weight")
+    if sw is not None:
+        if not isinstance(sw, dict) or not sw.get("column") \
+                or not isinstance(sw.get("mapping"), dict) or not sw["mapping"]:
+            raise ValueError(
+                "training.sample_weight must be {column: <str>, mapping: {value: weight}, "
+                "default: <num, optional>}")
+        bad_w = [v for v in list(sw["mapping"].values()) + [sw.get("default", 1.0)]
+                 if not isinstance(v, (int, float)) or float(v) < 0]
+        if bad_w:
+            raise ValueError("training.sample_weight weights must be non-negative "
+                             "numbers; got {0}".format(bad_w))
+
+    calib = cfg["export"].get("calibration")
+    if calib is not None and calib.get("enabled", False):
+        if calib.get("method", "isotonic") != "isotonic":
+            raise ValueError("export.calibration.method only supports 'isotonic'")
+
     split = cfg["training"].get("split", {})
     strategy = split.get("strategy", "stratified")
     if strategy not in ("stratified", "time"):
@@ -97,6 +136,43 @@ def _validate(cfg: Dict[str, Any]) -> None:
     if fill_strategy not in valid:
         raise ValueError("missing.global.fill_strategy must be one of {0}".format(valid))
 
+    pf = cfg["analysis"].get("psi_flag_thresholds") or {}
+    if pf:
+        shift_t = float(pf.get("shift", 0.10))
+        broken_t = float(pf.get("broken", 0.25))
+        if not (0 <= shift_t <= broken_t):
+            raise ValueError("analysis.psi_flag_thresholds requires 0 <= shift <= broken")
+
+    s1n = cfg["analysis"].get("stage1_top_n")
+    if s1n is not None and (not isinstance(s1n, int) or isinstance(s1n, bool) or s1n <= 0):
+        raise ValueError("analysis.stage1_top_n must be a positive integer or null")
+
+    ni = cfg["analysis"].get("null_importance") or {}
+    if ni:
+        if not isinstance(ni.get("enabled", False), bool):
+            raise ValueError("analysis.null_importance.enabled must be a boolean")
+        for k in ("n_actual_runs", "n_null_runs", "n_boost_rounds"):
+            v = ni.get(k)
+            if v is not None and (not isinstance(v, int) or v <= 0):
+                raise ValueError(
+                    "analysis.null_importance.{0} must be a positive integer".format(k))
+        kp = ni.get("keep_percentile")
+        if kp is not None and not (0 < float(kp) < 100):
+            raise ValueError("analysis.null_importance.keep_percentile must be in (0, 100)")
+
+    sc = cfg["io"].get("scan_cache") or {}
+    if sc and not isinstance(sc.get("enabled", True), bool):
+        raise ValueError("io.scan_cache.enabled must be a boolean")
+
+    fmts = cfg["export"].get("model_format", ["json"])
+    if isinstance(fmts, str):
+        fmts = [fmts]
+    valid_fmts = {"json", "bin", "binary", "ubj"}
+    bad = [f for f in fmts if str(f).strip().lower() not in valid_fmts]
+    if bad:
+        raise ValueError("export.model_format has invalid entries {0}; "
+                         "valid: {1}".format(bad, sorted(valid_fmts)))
+
     _validate_feature_groups(cfg)
 
 
@@ -105,6 +181,8 @@ def _validate_feature_groups(cfg: Dict[str, Any]) -> None:
     regex / preset mistakes fail at config load, not mid-Stage-1.
     """
     fg = cfg.get("feature_groups") or {}
+    if not fg.get("enable_window_family", True):
+        return
     patterns = fg.get("window_patterns")
     single = fg.get("window_pattern")
     if not patterns and not single:

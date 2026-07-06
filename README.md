@@ -17,10 +17,10 @@
 ## 环境
 
 ```
-Python 3.6.13
-xgboost==1.5.2
+Python 3.7
+xgboost==1.5.0
 shap, hyperopt, numpy<1.20, pandas<1.2, scikit-learn<0.25, matplotlib<3.4
-pyyaml, jsonschema<4, dataclasses (backport)
+pyyaml, jsonschema<4    # dataclasses is stdlib on 3.7
 ```
 
 安装：`pip install -r requirements.txt`
@@ -56,11 +56,12 @@ PYTHONPATH=src python3 scripts/run_training.py \
 ```
 
 产出 `artifacts/bank_marketing/models/prod01/`：
-- `booster.json` — XGBoost 原生模型（xgb 1.5.2）
+- `booster.json` / `booster.bin` — XGBoost 原生模型（xgb 1.5.0）。导出格式由 `export.model_format` 控制：`["json"]`（默认，文本可读）、`["bin"]`（原生二进制）或 `["json","bin"]`（两者皆出）。`predict.py` 会自动探测 `.bin`/`.json` 加载。
 - `feature_list.txt` — 特征顺序（含 `__isnan` 指示列）
 - `missing_spec.json` — 训练期 fit 的缺失值规则与填充值（`predict.py` 只重放不重算）
+- `calibration.json` — valid 上拟合的 isotonic 校准查表（`export.calibration` 控制，默认开启；单模型排序不变，跨模型融合必须用校准分）。`predict.py` 的 `score` 列保持原始分，校准分输出在新增的 `score_calibrated` 列
 - `predict.py` — 单文件自包含预测程序，只依赖 xgboost/numpy/pandas/argparse
-- `validation_samples.csv` — 100 行**原始特征** + `y_true` + `y_pred_expected`（1e-6 容差自测）
+- `validation_samples.csv` — 100 行**原始特征** + `y_true` + `y_pred_expected`（1e-6 容差自测；有校准时另含 `y_pred_calibrated_expected`，`--validate` 双路检查）
 - `importance.csv` — 特征重要性（gain/weight/cover + 中文列名）
 - `metrics.json` / `metrics.md` — 全量指标：PR-AUC / ROC-AUC / KS / Precision@K / Lift@K / Top-K CVR
 - `binned_lift_{train,valid,oot}.csv` — 10 分位 lift 表
@@ -80,6 +81,76 @@ python predict.py predict --input raw_samples.csv --output scores.csv
 ```
 
 部署人员只需理解：输入 CSV 是原始业务数据（允许 `0 / 负值 / 空 / 哨兵值 / NaN`），输出是 `row_index, score`。缺失值处理由 `predict.py` 内部完成。
+
+### xc 漏斗工作流（响应+资质双模型 → 校准融合漏斗分析 + 端到端基线）
+
+**建模漏斗**只取两段式：响应模型用 `is_finish_task`（全量人群），资质模型在 `is_finish_task==1` 人群上分两个版本（V1 用 `is_credit_succ`：1 正 / 0 负；V2 用 `credit_1v1`：1/2/3 正、0 和 -1 负，合表时衍生为二值列 `is_credit_1v1`）。**分析漏斗**基于响应 × 资质的融合分，按全流程 `is_reg → is_finish_task → 授信` 评估各阶段与综合提升（`is_reg` 仅用于分析，不建模）。另有两个**端到端基线**（全量人群直推授信结果的单模型），用于对照"两段式融合是否真的更优"。
+
+| 模型 | 人群 | 标签 |
+|---|---|---|
+| 响应 `xc_resp_finish` | 全量 | `is_finish_task` |
+| 资质 V1 `xc_qual_finish` | is_finish_task==1 | `is_credit_succ`（1 正 / 0 负） |
+| 资质 V2 `xc_qual_finish_1v1` | is_finish_task==1 | `is_credit_1v1`（credit_1v1 ∈ {1,2,3} 正；0、-1 负）+ 档位价值加权（790/290/120） |
+| 端到端 V1 `xc_e2e_credit` | 全量 | `is_credit_succ`（基线对照） |
+| 端到端 V2 `xc_e2e_credit_1v1` | 全量 | `is_credit_1v1`（基线对照，档位价值加权） |
+
+xc 各产品统一配置 `tuner_objective: precision_at_k`（调参直接最大化 CV P@10% 而非全曲线 PR-AUC）与 `cv_strategy: time_forward`（前向扩窗时间折，与按时间切分的最终评估口径一致）。
+
+```bash
+# 1. 合表：产出 data/xc_full.csv（全量）+ xc_qual_finish.csv（is_finish_task==1，
+#    含衍生标签 is_credit_1v1），并打印全流程分析漏斗（两个授信口径各一份）。
+#    特征/标签文件时间列均为 dt（特征 yyyy-mm-dd 或 yyyymmdd，标签 yyyymmdd），归一成 int yyyymmdd 后按 (id, dt) join
+PYTHONPATH=src python3 scripts/build_xc_dataset.py \
+  --features data/xc_features.csv --labels data/xc_labels.csv
+
+# 2. 每个模型各跑 Stage-1 + Stage-2（资质 V2 换 xc_qual_finish_1v1；
+#    端到端基线换 xc_e2e_credit / xc_e2e_credit_1v1）
+PYTHONPATH=src python3 scripts/run_analysis.py --product xc_resp_finish
+PYTHONPATH=src python3 scripts/run_training.py --product xc_resp_finish --run-id r01
+PYTHONPATH=src python3 scripts/run_analysis.py --product xc_qual_finish
+PYTHONPATH=src python3 scripts/run_training.py --product xc_qual_finish --run-id q01
+PYTHONPATH=src python3 scripts/run_analysis.py --product xc_e2e_credit
+PYTHONPATH=src python3 scripts/run_training.py --product xc_e2e_credit --run-id e01
+
+# 3. 融合漏斗分析：fused = 校准响应分 × 校准资质分（每个 bundle 的
+#    calibration.json 在 valid 上拟合 isotonic，消除 scale_pos_weight 带来的
+#    概率畸变）；fused_alpha = resp^α × qual^(1-α)，α 在 OOT 之前的拟合窗
+#    （两模型 valid 期重叠段）网格搜索、最大化授信 lift@K。
+#    默认仅在所有模型都未见过的 OOT 时段评估（可用 --start-dt/--end-dt 覆盖）
+PYTHONPATH=src python3 scripts/run_funnel_eval.py \
+  --resp-product xc_resp_finish --resp-run-id r01 \
+  --qual-product xc_qual_finish --qual-run-id q01 \
+  --e2e-product xc_e2e_credit --e2e-run-id e01
+# 资质 V2：--qual-product xc_qual_finish_1v1 --qual-stage is_credit_1v1
+#   --e2e-product xc_e2e_credit_1v1 --tier-values "1:120,2:290,3:790"
+#   （--tier-values 额外输出 value_capture 行 = top-K 人均业务价值提升）
+# 其他开关：--alpha 0.6 手动指定 / --no-alpha 跳过 α 融合 / --alpha-k 0.10 目标 K
+```
+
+产出 `artifacts/funnel_eval/<resp>__<qual>/funnel_eval.{csv,md}` + `fusion_spec.json`：
+- **absolute 口径**：top-K 内 `is_reg / is_finish_task / 授信标签` 率 vs 全人群基线，授信行（`is_credit_succ` 或 `is_credit_1v1`，随 `--qual-stage`）即端到端**综合提升**；
+- **conditional 口径**：top-K 内 reg、finish|reg、credit|finish 的逐段转化 vs 人群基线，定位提升来自哪一段；
+- 同时给出 `fused / fused_alpha / resp_only / qual_only / e2e_only` 排序对照，量化融合与 α 加权增益、检验两段式是否优于端到端单模型；
+- `fusion_spec.json` 是部署侧的执行契约：α、拟合/评估窗口、各 α 的拟合曲线、serving_formula（用两个 bundle 的 `score_calibrated` 列按公式融合）。
+
+注意：中间/下游/平行结果列绝不能入特征（各 config 已 park 在 `id_columns`，如 `xc_qual_finish` 里的 `is_credit_1v1` 与原始 `credit_1v1`）。`xc_qual_finish_1v1` 的 `credit_1v1` 同时被 `training.sample_weight` 引用 —— 只作训练损失权重，调参 P@K、早停与上报指标均按人头不加权。
+
+生产环境完整执行步骤（含检查点、验收标准、上线打分与监控）见 `docs/PRODUCTION_RUNBOOK.md`；
+交互式漏斗探索（连续 top-K 提升曲线、资质 V1/V2 对比）见 `notebooks/06_funnel_eval_xc.ipynb`。
+
+### Notebooks
+
+`notebooks/` 按工作流编号。01–05 通过开头的 `PRODUCT` / `RUN_ID` 参数适配任意产品（默认 xc，非 xc 产品运行时 xc 专属格自动跳过）；06/07 为 xc 专属。04–07 内核需带 xgboost（conda `env_ml`）。
+
+| notebook | 用途 | 对应 runbook |
+|---|---|---|
+| `01_data_overview` | 数据/合表总览：标签与档位分布、分析漏斗、标签成熟度、join 质检、缺失概览 | 第 1 步检查点 |
+| `02_feature_analysis` | Stage-1 报告解读：rank_score 口径、lift 软门槛、PSI 稳定性、相关性簇、per-feature 图 | 第 2 步 |
+| `03_feature_selection_review` | 筛选链路 v1_auto→v2_model→v3_manual diff、null importance 体检、跨 xc 产品清单重叠 | 第 2.5/3 步检查点 |
+| `04_model_training` | Stage-2 交互训练：切分体检、hyperopt 轨迹、训练后退化/lift 快速诊断 | 第 4 步（探索） |
+| `05_model_evaluation` | 训练产物验收：manifest/校准体检、退化检查、分位 lift、5 个 xc 模型横向汇总 | 第 4/5 步检查点 |
+| `06_funnel_eval_xc` | 融合漏斗探索：连续 top-K 曲线、alpha 敏感性、conditional 分段、资质 V1/V2 对比 | 第 6 步（探索） |
+| `07_xc_monitoring` | 上线后监控与复盘：分数/特征 PSI 漂移、上线窗口转化复盘（固定线上 α） | 第 8 步 |
 
 ## 关键配置说明
 
@@ -105,10 +176,20 @@ python predict.py predict --input raw_samples.csv --output scores.csv
 
 ### 时间窗家族与语义簇
 
-- **自动家族**：`txn_amt_7d / _30d / _90d / _all` 等由 `feature_groups.window_pattern` 自动识别，家族内最多保留 `max_per_family`（默认 2）个。
+- **自动家族**：`txn_amt_7d / _30d / _90d / _all` 等由 `feature_groups.window_pattern` 自动识别，家族内最多保留 `max_per_family`（默认 2）个。可用 `feature_groups.enable_window_family: false` 关闭（特征是纯编号、无时间窗后缀时，如 `xc`）。
 - **语义簇**：在 product YAML 的 `feature_groups.semantic_groups` 里手动声明（如"机构数/还款金额/申请数"），簇内最多保留 `max_keep` 个。
 
-两种机制互相独立，均通过 `selector.py` 合并入综合打分。
+两种机制互相独立，均通过 `selector.py` 合并入综合打分。相关性（数值 `|r|`）去冗余聚类与名称无关，始终生效。
+
+### 综合打分权重与正例偏向筛选
+
+`selector.py` 的 `rank_score` 权重可在 `analysis.rank_weights` 配置（默认值等价旧公式 `z(iv)+z(lift)+z(gini)-z(psi)-0.5·1[missing>0.5]`）：
+
+- `iv / lift / gini / concentration / psi` —— 各信号权重；调高 `lift`、`concentration` 即偏向"把正例排到前面"的特征。
+- `missing_penalty` + `missing_penalty_threshold` —— 缺失惩罚的权重与触发阈值（按需压低，避免过度惩罚高缺失特征）。
+- `analysis.lift_keep_min` —— 正例软门槛：`iv < iv_min` 但 `lift_at_k >= lift_keep_min` 的特征仍保留（默认 `null` 关闭）。
+
+`xc` 即采用此组合：抬高 `lift`/`concentration`、压低 `missing_penalty`、开启 `lift_keep_min`，使筛选主要偏向正例且不过度惩罚缺失。
 
 ## 测试
 

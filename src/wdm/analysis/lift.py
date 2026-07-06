@@ -75,11 +75,33 @@ def _lift_at_k_from_bins(bin_specs, top_k_pct, total_pos, total_n):
     return float(lift), float(concentration)
 
 
+def lift_row_from_array(arr, y, feat, total_pos, total_n, top_k_pct, n_bins):
+    """Per-feature kernel shared by compute_feature_lift_table and the
+    single-pass scan. Returns {feature, lift_at_k, gini, concentration}."""
+    edges = equal_freq_edges(arr, n_bins=n_bins)
+    if edges.size < 2:
+        return {"feature": feat, "lift_at_k": 1.0, "gini": 0.0,
+                "concentration": 0.0}
+    n_real = edges.size - 1
+    bins = digitize_with_missing(arr, edges)
+    bc = bin_counts(bins, n_bins=n_real, y=y)
+    # missing bin participates as its own bucket
+    bin_specs = list(zip(bc["n"], bc["pos"]))
+    if bc["n_missing"] > 0:
+        bin_specs.append((bc["n_missing"], bc["pos_missing"]))
+    lift, conc = _lift_at_k_from_bins(bin_specs, top_k_pct, total_pos, total_n)
+    gini = _feature_gini(arr, y)
+    return {"feature": feat, "lift_at_k": lift, "gini": gini,
+            "concentration": conc}
+
+
 def compute_feature_lift_table(chunk_iter, spec_map, y_series, cfg, get_spec_fn):
     """Compute per-feature lift table.
 
     Returns DataFrame[feature, lift_at_k, gini, concentration].
     """
+    from wdm.preprocess.missing import to_nan_array
+
     y = y_series.values.astype(np.int64)
     total_n = y.size
     total_pos = int(y.sum())
@@ -92,24 +114,8 @@ def compute_feature_lift_table(chunk_iter, spec_map, y_series, cfg, get_spec_fn)
             raise ValueError("chunk rows != label rows")
         for feat in block:
             spec = get_spec_fn(spec_map, feat)
-            from wdm.preprocess.missing import to_nan_array
             arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
-            edges = equal_freq_edges(arr, n_bins=n_bins_cfg)
-            if edges.size < 2:
-                rows.append({"feature": feat, "lift_at_k": 1.0, "gini": 0.0,
-                             "concentration": 0.0})
-                continue
-            n_real = edges.size - 1
-            bins = digitize_with_missing(arr, edges)
-            bc = bin_counts(bins, n_bins=n_real, y=y)
-            # missing bin participates as its own bucket
-            bin_specs = list(zip(bc["n"], bc["pos"]))
-            if bc["n_missing"] > 0:
-                bin_specs.append((bc["n_missing"], bc["pos_missing"]))
-            lift, conc = _lift_at_k_from_bins(bin_specs, top_k_pct,
-                                              total_pos, total_n)
-            gini = _feature_gini(arr, y)
-            rows.append({"feature": feat, "lift_at_k": lift, "gini": gini,
-                         "concentration": conc})
+            rows.append(lift_row_from_array(arr, y, feat, total_pos, total_n,
+                                            top_k_pct, n_bins_cfg))
     df = pd.DataFrame(rows).sort_values("lift_at_k", ascending=False).reset_index(drop=True)
     return df

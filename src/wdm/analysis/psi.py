@@ -67,12 +67,33 @@ def compute_psi(expected_values_nan, actual_values_nan,
     return _psi_from_counts(_pct(e_bins), _pct(a_bins))
 
 
-def flag(psi_value):
-    if psi_value < 0.10:
+def flag(psi_value, shift_threshold=0.10, broken_threshold=0.25):
+    if psi_value < shift_threshold:
         return "stable"
-    if psi_value < 0.25:
+    if psi_value < broken_threshold:
         return "shift"
     return "broken"
+
+
+def flag_thresholds(cfg):
+    """Read analysis.psi_flag_thresholds from cfg; defaults preserve the
+    legacy 0.10/0.25 banding."""
+    t = (cfg.get("analysis") or {}).get("psi_flag_thresholds") or {}
+    return float(t.get("shift", 0.10)), float(t.get("broken", 0.25))
+
+
+def psi_row_from_array(arr_full, mask_e, mask_a, feat, n_bins,
+                       shift_threshold=0.10, broken_threshold=0.25):
+    """Per-feature kernel shared by compute_psi_table_single_source and the
+    single-pass scan: full-data NaN-aware array + expected/actual row masks in,
+    {feature, psi, flag} out."""
+    arr_e = arr_full[mask_e]
+    arr_a = arr_full[mask_a]
+    edges = equal_freq_edges(arr_e, n_bins=n_bins)
+    psi = compute_psi(arr_e, arr_a, edges=edges, n_bins=n_bins,
+                      missing_as_bin=True)
+    return {"feature": feat, "psi": float(psi),
+            "flag": flag(psi, shift_threshold, broken_threshold)}
 
 
 def compute_psi_table(chunk_iter_train, chunk_iter_oot, spec_map, feature_names,
@@ -83,6 +104,7 @@ def compute_psi_table(chunk_iter_train, chunk_iter_oot, spec_map, feature_names,
     blocks (same feature ordering), but with different rows (train vs oot).
     """
     n_bins_cfg = int(cfg["analysis"].get("n_bins", 10))
+    shift_t, broken_t = flag_thresholds(cfg)
 
     rows = []
     # We iterate both iterators in lockstep.
@@ -97,7 +119,8 @@ def compute_psi_table(chunk_iter_train, chunk_iter_oot, spec_map, feature_names,
             edges = equal_freq_edges(arr_tr, n_bins=n_bins_cfg)
             psi = compute_psi(arr_tr, arr_oot, edges=edges, n_bins=n_bins_cfg,
                               missing_as_bin=True)
-            rows.append({"feature": feat, "psi": float(psi), "flag": flag(psi)})
+            rows.append({"feature": feat, "psi": float(psi),
+                         "flag": flag(psi, shift_t, broken_t)})
     return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)
 
 
@@ -110,8 +133,11 @@ def compute_psi_table_single_source(chunk_iter, mask_expected, mask_actual,
     total row count.
     """
     n_bins_cfg = int(cfg["analysis"].get("n_bins", 10))
+    shift_t, broken_t = flag_thresholds(cfg)
     m_e = np.asarray(mask_expected, dtype=bool)
     m_a = np.asarray(mask_actual, dtype=bool)
+
+    from wdm.preprocess.missing import to_nan_array
 
     rows = []
     for df_chunk, block in chunk_iter:
@@ -119,12 +145,7 @@ def compute_psi_table_single_source(chunk_iter, mask_expected, mask_actual,
             raise ValueError("chunk rows != mask length")
         for feat in block:
             spec = get_spec_fn(spec_map, feat)
-            from wdm.preprocess.missing import to_nan_array
             full, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
-            arr_e = full[m_e]
-            arr_a = full[m_a]
-            edges = equal_freq_edges(arr_e, n_bins=n_bins_cfg)
-            psi = compute_psi(arr_e, arr_a, edges=edges, n_bins=n_bins_cfg,
-                              missing_as_bin=True)
-            rows.append({"feature": feat, "psi": float(psi), "flag": flag(psi)})
+            rows.append(psi_row_from_array(full, m_e, m_a, feat, n_bins_cfg,
+                                           shift_t, broken_t))
     return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)

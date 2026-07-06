@@ -1,0 +1,2 @@
+group_name,description,member_features,iv_best,kept_count,kept_features,missing_members
+bureau,credit bureau counters,"bureau_query_cnt,bureau_org_cnt,bureau_overdue_cnt",0.20130170929913538,2,"bureau_query_cnt,bureau_org_cnt",

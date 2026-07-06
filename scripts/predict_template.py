@@ -10,9 +10,13 @@ Keep this file self-contained — only use xgboost/numpy/pandas/json/argparse.
 Contract:
   * Input CSV = raw business data. Missing values, sentinels, negatives, empty
     fields are allowed — they are handled internally via missing_spec.json.
-  * Output CSV = <id_col>, score
+  * Output CSV = <id_col>, score (raw model probability). When the bundle
+    contains calibration.json an extra score_calibrated column is emitted
+    (isotonic curve replayed via np.interp) — use THAT column when fusing
+    scores across models; `score` alone keeps legacy single-model behavior.
   * `python predict.py --validate` reproduces y_pred_expected from
-    validation_samples.csv to 1e-6, exercising the full pipeline end-to-end.
+    validation_samples.csv to 1e-6, exercising the full pipeline end-to-end;
+    when calibration is present it also checks y_pred_calibrated_expected.
 """
 import argparse
 import json
@@ -86,7 +90,19 @@ class Predictor(object):
     def __init__(self, bundle_dir):
         self.bundle = Path(bundle_dir)
         self.booster = xgb.Booster()
-        self.booster.load_model(str(self.bundle / "booster.json"))
+        # Auto-detect the serialized model: prefer native binary, fall back to
+        # json/ubj. xgboost identifies the format from file contents.
+        model_path = None
+        for cand in ("booster.bin", "booster.json", "booster.ubj"):
+            p = self.bundle / cand
+            if p.is_file():
+                model_path = p
+                break
+        if model_path is None:
+            raise FileNotFoundError(
+                "No booster model found in {0} (looked for booster.bin/.json/.ubj)"
+                .format(self.bundle))
+        self.booster.load_model(str(model_path))
         with open(self.bundle / "feature_list.txt", "r", encoding="utf-8") as f:
             # Skip comment header lines; keep order
             self.feature_list = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
@@ -104,6 +120,27 @@ class Predictor(object):
         # Precompute indicator features (names ending with __isnan)
         self.indicator_features = [f for f in self.feature_list if f.endswith("__isnan")]
         self.base_features = [f for f in self.feature_list if not f.endswith("__isnan")]
+        # Optional isotonic calibration lookup table (raw score -> probability).
+        self.calib_x = None
+        self.calib_y = None
+        calib_path = self.bundle / "calibration.json"
+        if calib_path.is_file():
+            with open(str(calib_path), "r", encoding="utf-8") as f:
+                table = json.load(f)
+            self.calib_x = np.asarray(table["x"], dtype=np.float64)
+            self.calib_y = np.asarray(table["y"], dtype=np.float64)
+
+    @property
+    def has_calibration(self):
+        return self.calib_x is not None
+
+    def calibrate(self, raw_scores):
+        """Replay the isotonic curve (constant extrapolation at the ends —
+        identical to the training-time fit). No-op without calibration.json."""
+        s = np.asarray(raw_scores, dtype=np.float64)
+        if self.calib_x is None:
+            return s
+        return np.interp(s, self.calib_x, self.calib_y)
 
         # best_iteration: prefer the manifest value (exporter stamps it from
         # the live booster) over booster.best_iteration, since the attribute
@@ -215,8 +252,13 @@ def cmd_predict(args):
     df = pd.read_csv(args.input)
     scores = pr.predict_proba(df)
     out = pd.DataFrame({"row_index": np.arange(len(df)), "score": scores})
+    if pr.has_calibration:
+        out["score_calibrated"] = pr.calibrate(scores)
     out.to_csv(args.output, index=False)
     print("Wrote {0} rows to {1}".format(len(df), args.output))
+
+
+_NON_FEATURE_COLS = ("y_true", "y_pred_expected", "y_pred_calibrated_expected")
 
 
 def cmd_validate(args):
@@ -226,18 +268,40 @@ def cmd_validate(args):
     if "y_pred_expected" not in df.columns:
         raise SystemExit("validation_samples.csv is missing y_pred_expected")
     expected = df["y_pred_expected"].values.astype(np.float64)
-    feature_cols = [c for c in df.columns if c not in ("y_true", "y_pred_expected")]
+    feature_cols = [c for c in df.columns if c not in _NON_FEATURE_COLS]
     scores = pr.predict_proba(df[feature_cols])
+    tol = float(args.tol)
+    failed = False
+
     diff = np.abs(scores - expected)
     worst = float(diff.max()) if diff.size else 0.0
-    tol = float(args.tol)
     if worst > tol:
-        print("FAIL: max |pred - expected| = {0:.3e} > tol {1:.0e}".format(worst, tol))
+        failed = True
+        print("FAIL (raw): max |pred - expected| = {0:.3e} > tol {1:.0e}".format(worst, tol))
         print(pd.DataFrame({"expected": expected, "actual": scores, "diff": diff})
               .sort_values("diff", ascending=False).head(5).to_string(index=False))
+    else:
+        print("OK (raw): all {0} samples within tolerance (max |diff| = {1:.3e})".format(
+            len(df), worst))
+
+    if "y_pred_calibrated_expected" in df.columns and pr.has_calibration:
+        expected_cal = df["y_pred_calibrated_expected"].values.astype(np.float64)
+        diff_cal = np.abs(pr.calibrate(scores) - expected_cal)
+        worst_cal = float(diff_cal.max()) if diff_cal.size else 0.0
+        if worst_cal > tol:
+            failed = True
+            print("FAIL (calibrated): max |diff| = {0:.3e} > tol {1:.0e}".format(
+                worst_cal, tol))
+        else:
+            print("OK (calibrated): all {0} samples within tolerance "
+                  "(max |diff| = {1:.3e})".format(len(df), worst_cal))
+    elif "y_pred_calibrated_expected" in df.columns:
+        failed = True
+        print("FAIL: validation_samples.csv has y_pred_calibrated_expected but the "
+              "bundle has no calibration.json")
+
+    if failed:
         raise SystemExit(1)
-    print("OK: all {0} samples within tolerance (max |diff| = {1:.3e})".format(
-        len(df), worst))
 
 
 def main():

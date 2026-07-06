@@ -78,6 +78,9 @@ def main():
     group.add_argument("--no-probing", dest="probing", action="store_false",
                        default=None,
                        help="Force-disable Stage-1 probing (default: follow config).")
+    ap.add_argument("--model-screen", action="store_true",
+                    help="After Stage 1, run the model-based null-importance "
+                         "screen (needs xgboost; see scripts/run_model_screen.py).")
     args = ap.parse_args()
 
     setup_logging()
@@ -105,6 +108,20 @@ def main():
     print("Next: inspect {0}/index.html, optionally copy v1_auto.txt to v1_manual.txt"
           " and edit, then run scripts/run_training.py --product {1} --run-id <id>".format(
           result["report_dir"], args.product))
+
+    ni_cfg = (cfg["analysis"].get("null_importance") or {})
+    if args.model_screen or bool(ni_cfg.get("enabled", False)):
+        from wdm.analysis.null_importance import run_null_importance
+        try:
+            screen = run_null_importance(cfg)
+        except RuntimeError as e:
+            # Stage-1 artifacts are already on disk — only the screen failed.
+            print("Model screen FAILED (Stage-1 artifacts are intact): {0}".format(e),
+                  file=sys.stderr)
+            sys.exit(1)
+        print()
+        print("Model screen: kept {0} / {1} features → {2}".format(
+            screen["n_kept"], screen["n_features_in"], screen["features_txt"]))
 
     # Per-feature plots are optionally run here after Stage 1 closes.
     if not args.no_plots:

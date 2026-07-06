@@ -155,7 +155,18 @@ def parse_families(features, cfg):
     Supports both single-regex (`feature_groups.window_pattern`) and
     multi-pattern (`feature_groups.window_patterns`) config; see module
     docstring for schema details.
+
+    When feature_groups.enable_window_family is False (e.g. datasets whose
+    features are plain numeric IDs with no time-window suffix), every feature
+    is treated as its own singleton family — no name-based clustering.
     """
+    if not cfg["feature_groups"].get("enable_window_family", True):
+        return pd.DataFrame([
+            {"feature": f, "family_base": f, "window": None,
+             "window_rank": None, "pattern_id": None}
+            for f in features
+        ])
+
     patterns = _resolve_patterns(cfg)
     order = list(cfg["feature_groups"].get("window_order") or [])
     rank_map = {w: i for i, w in enumerate(order)}
