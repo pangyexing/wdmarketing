@@ -130,18 +130,6 @@ class Predictor(object):
             self.calib_x = np.asarray(table["x"], dtype=np.float64)
             self.calib_y = np.asarray(table["y"], dtype=np.float64)
 
-    @property
-    def has_calibration(self):
-        return self.calib_x is not None
-
-    def calibrate(self, raw_scores):
-        """Replay the isotonic curve (constant extrapolation at the ends —
-        identical to the training-time fit). No-op without calibration.json."""
-        s = np.asarray(raw_scores, dtype=np.float64)
-        if self.calib_x is None:
-            return s
-        return np.interp(s, self.calib_x, self.calib_y)
-
         # best_iteration: prefer the manifest value (exporter stamps it from
         # the live booster) over booster.best_iteration, since the attribute
         # may or may not survive save/load across xgboost versions. Falling
@@ -178,6 +166,18 @@ class Predictor(object):
                 "feature_list.txt has {0} entries but booster.json expects {1} "
                 "features — bundle is inconsistent. Re-export from training.".format(
                     len(self.feature_list), booster_n))
+
+    @property
+    def has_calibration(self):
+        return self.calib_x is not None
+
+    def calibrate(self, raw_scores):
+        """Replay the isotonic curve (constant extrapolation at the ends —
+        identical to the training-time fit). No-op without calibration.json."""
+        s = np.asarray(raw_scores, dtype=np.float64)
+        if self.calib_x is None:
+            return s
+        return np.interp(s, self.calib_x, self.calib_y)
 
     def _apply(self, df_raw):
         needed = set(self.base_features)
