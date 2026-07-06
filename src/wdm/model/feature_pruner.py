@@ -56,6 +56,15 @@ logger = logging.getLogger(__name__)
 def _train_exploratory(X_tr, y_tr, X_va, y_va, prune_cfg, seed=0):
     params = dict(prune_cfg.get("xgb_params") or {})
     params["seed"] = int(seed)
+    # Align the imbalance regime with the deployed model (which tunes
+    # scale_pos_weight): an unweighted exploratory ranker under-ranks
+    # features whose signal concentrates in the rare positive class.
+    # Explicit xgb_params.scale_pos_weight still wins.
+    if "scale_pos_weight" not in params:
+        n_pos = float(np.sum(np.asarray(y_tr) == 1))
+        n_neg = float(np.asarray(y_tr).size - n_pos)
+        if n_pos > 0:
+            params["scale_pos_weight"] = n_neg / n_pos
     n_rounds = int(prune_cfg.get("num_boost_round", 200))
     early_stop = int(prune_cfg.get("early_stopping_rounds", 30))
     dtrain = xgb.DMatrix(X_tr, label=y_tr)

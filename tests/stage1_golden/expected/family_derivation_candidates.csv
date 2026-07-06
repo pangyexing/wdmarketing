@@ -1,4 +1,4 @@
 family_base,n_windows,window_list,iv_best_window,iv_best_value,iv_shortest_window,iv_shortest_value,iv_ratio_long_over_short,iv_delta_best_vs_short,missing_rate_shortest,suggested_ops,rationale,already_configured
-amt,4,"all,90d,30d,7d",all,0.5885170714653584,7d,0.46532992827788267,1.2647307548933573,0.1231871431874757,0.0,incremental,has_3plus_windows,False
-cnt,4,"all,90d,30d,7d",all,0.09520849536047642,7d,0.035690784078668845,2.6675932686325954,0.05951771128180757,0.47935,"delta,ratio,incremental",long_2.67x_iv_of_short;has_3plus_windows,False
-txn,6,"30d,7d,all,180d,360d,90d",30d,0.004653053643829555,7d,0.004526761144168528,0.8247059959389191,0.00012629249966102703,0.0,"incremental,keep_short_only",has_3plus_windows;short_iv_within_20pct_of_best,False
+amt,4,"all,90d,30d,7d",all,0.5887386223742413,7d,0.46383781881508246,1.269276886214733,0.12490080355915889,0.0,incremental,has_3plus_windows,False
+cnt,4,"all,90d,30d,7d",all,0.09135759140609492,7d,0.040403168451437106,2.2611491847700727,0.05095442295465782,0.47935,"delta,ratio,incremental",long_2.26x_iv_of_short;has_3plus_windows,False
+txn,6,"30d,7d,180d,360d,90d,all",30d,0.008305016443271038,7d,0.007921328369540898,0.509541473702008,0.00038368807373014013,0.0,"incremental,keep_short_only",has_3plus_windows;short_iv_within_20pct_of_best,False

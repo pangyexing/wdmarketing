@@ -130,6 +130,19 @@ def _validate(cfg: Dict[str, Any]) -> None:
         raise ValueError("training.split.ratios must be 3 numbers summing to 1.0")
     if strategy == "time" and not data.get("time_column"):
         raise ValueError("split.strategy='time' requires data.time_column")
+    emb = split.get("embargo_days", 0)
+    if emb is not None and (not isinstance(emb, int) or isinstance(emb, bool)
+                            or emb < 0):
+        raise ValueError("training.split.embargo_days must be a non-negative integer")
+
+    sup_split = cfg["analysis"].get("supervised_stats_split", "train_only")
+    if str(sup_split).lower() not in ("train_only", "full"):
+        raise ValueError("analysis.supervised_stats_split must be "
+                         "'train_only' or 'full'")
+
+    psi_part = cfg["analysis"].get("psi_partition", "halves")
+    if str(psi_part).lower() not in ("halves", "train_vs_rest"):
+        raise ValueError("analysis.psi_partition must be 'halves' or 'train_vs_rest'")
 
     fill_strategy = cfg["missing"]["global"].get("fill_strategy")
     valid = {"constant", "median", "mean", "zero", "special", "keep_nan"}

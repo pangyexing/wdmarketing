@@ -59,11 +59,18 @@ def block_cache_path(cache_dir, block_index):
 
 
 def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
-                     spec_map, get_spec_fn, cfg, cache_dir=None):
+                     spec_map, get_spec_fn, cfg, cache_dir=None,
+                     supervised_mask=None):
     """One pass over iter_column_chunks → ScanResult.
 
     cache_dir, when given, must be an existing (preferably empty, run-private)
     directory; it receives block_NNNN.npy files + a manifest.json.
+
+    supervised_mask: optional boolean row mask. When given, the label-driven
+    statistics (IV/WOE, bin edges, Lift@K, Gini) are fit on the masked rows
+    only — pass the train-split mask so valid/OOT labels never influence
+    feature selection. Label-free statistics (missing, PSI, correlation
+    pass-1) always use all rows.
     """
     from wdm.io.chunked_reader import iter_column_chunks
     from wdm.preprocess.missing import to_nan_array
@@ -75,9 +82,17 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
     blocks = [features[i * chunk_size:(i + 1) * chunk_size]
               for i in range(n_chunks)]
 
-    # Same y views as the legacy per-signal functions.
-    y_iv = y_series.values
-    y_lift = y_series.values.astype(np.int64)
+    n_expected_rows = y_series.values.shape[0]
+    sup = None
+    if supervised_mask is not None:
+        sup = np.asarray(supervised_mask, dtype=bool)
+        if sup.shape[0] != n_expected_rows:
+            raise ValueError("supervised_mask length != y length")
+
+    # Same y views as the legacy per-signal functions (optionally restricted
+    # to the supervised rows).
+    y_iv = y_series.values if sup is None else y_series.values[sup]
+    y_lift = y_iv.astype(np.int64)
     total_n = y_lift.size
     total_pos = int(y_lift.sum())
 
@@ -114,11 +129,11 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
                 est_gb = n_rows * len(features) * 8.0 / 1e9
                 logger.info("scan cache enabled: ~%.2f GB of .npy blocks in %s",
                             est_gb, cache_dir)
-        if n_total != y_iv.shape[0]:
+        if n_total != n_expected_rows:
             raise ValueError(
                 "chunk rows ({0}) != y rows ({1}); the CSV must be a single "
                 "consistent file for chunked analysis.".format(
-                    n_total, y_iv.shape[0]))
+                    n_total, n_expected_rows))
         if n_total != m_e.shape[0]:
             raise ValueError("chunk rows != mask length")
 
@@ -132,12 +147,13 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
             if feat in seen:
                 continue
             seen.add(feat)
-            iv_row, bs = iv_row_from_array(arr, y_iv, feat, n_bins_cfg, strategy)
+            arr_sup = arr if sup is None else arr[sup]
+            iv_row, bs = iv_row_from_array(arr_sup, y_iv, feat, n_bins_cfg, strategy)
             bin_specs[feat] = bs
             iv_rows.append(iv_row)
             miss_rows.append(missing_row_from_array(feat, str(raw.dtype),
                                                     arr, mask, n_total))
-            lift_rows.append(lift_row_from_array(arr, y_lift, feat, total_pos,
+            lift_rows.append(lift_row_from_array(arr_sup, y_lift, feat, total_pos,
                                                  total_n, top_k_pct, n_bins_cfg))
             psi_rows.append(psi_row_from_array(arr, m_e, m_a, feat, n_bins_cfg,
                                                shift_t, broken_t))

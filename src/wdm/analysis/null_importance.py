@@ -92,7 +92,7 @@ def run_null_importance(cfg, base_version=None, out_version=None,
     n_null = int(n_null_runs if n_null_runs is not None
                  else ni_cfg.get("n_null_runs", 30))
     n_rounds = int(ni_cfg.get("n_boost_rounds", 100))
-    keep_pct = float(ni_cfg.get("keep_percentile", 75))
+    keep_pct = float(ni_cfg.get("keep_percentile", 95))
     imp_type = str(ni_cfg.get("importance_type", "gain"))
     seed = int(seed if seed is not None
                else cfg["training"].get("random_seed", 42))

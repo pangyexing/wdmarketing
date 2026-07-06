@@ -14,7 +14,10 @@ Design choices:
   would leak OOT signal into feature selection.
 - **Fixed, cheap hyperparameters**: probing is a signal-generator, not a
   model to deploy. Default: max_depth=6, eta=0.1, subsample=0.8,
-  colsample_bytree=0.8, seed=42, num_boost_round=300, early_stopping=30.
+  colsample_bynode=0.8 (see _DEFAULT_XGB_PARAMS comment), seed=42,
+  num_boost_round=300, early_stopping=30. scale_pos_weight defaults to
+  neg/pos of the train split so feature ranking sees the same imbalance
+  regime as the deployed model (override via xgb_params).
 - **Deterministic**: fixed seed + single-threaded tie-break → reproducible
   rank_score contribution across runs.
 """
@@ -93,7 +96,8 @@ def _build_split_masks(cfg, n_rows, time_values=None, y=None):
     if strategy == "time":
         if time_values is None:
             raise ValueError("split.strategy='time' but no time_column in cache.")
-        return split_by_yyyymmdd(time_values, ratios)
+        return split_by_yyyymmdd(time_values, ratios,
+                                 embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
     if y is None:
         raise ValueError("Stratified split requires y.")
     return split_stratified(y, ratios, seed=seed)
@@ -227,6 +231,15 @@ def run_probing(cfg, cache_dir, out_dir):
 
     # 5) Train with early stopping on valid
     params, num_boost_round, early_stopping = _resolve_probing_params(cfg)
+    # Align the imbalance regime with the deployed model (and with the
+    # null-importance screen): an unweighted probing model under-ranks
+    # features whose signal concentrates in the rare positive class.
+    # Explicit xgb_params.scale_pos_weight still wins.
+    if "scale_pos_weight" not in params:
+        n_pos = float((y_tr == 1).sum())
+        n_neg = float(y_tr.size - n_pos)
+        if n_pos > 0:
+            params["scale_pos_weight"] = n_neg / n_pos
     evals_result = {}
     booster = xgb.train(
         params=params,

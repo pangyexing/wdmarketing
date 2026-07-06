@@ -94,7 +94,9 @@ def _derive_boundaries(cfg):
     time_col = cfg["data"]["time_column"]
     path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
     dt = pd.read_csv(path, usecols=[time_col])[time_col]
-    _m_tr, m_va, m_oot = split_by_yyyymmdd(dt, list(split_cfg["ratios"]))
+    _m_tr, m_va, m_oot = split_by_yyyymmdd(
+        dt, list(split_cfg["ratios"]),
+        embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
     nums = pd.to_numeric(dt, errors="coerce")
     out = {}
     for key, mask in (("valid_min_dt", m_va), ("oot_min_dt", m_oot)):

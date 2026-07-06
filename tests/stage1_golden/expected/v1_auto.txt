@@ -1,11 +1,11 @@
 # Auto-generated feature list
 # parent: null
-# report_hash: 2f4cc6aafb9d
+# report_hash: 09b44fde0eb2
 # feature_count: 5
-# source: analysis/selector.py
+# source: pipeline/stage1.py
 
-amt_all
+amt_90d
 bureau_query_cnt
 dup_b
-cnt_90d
 cnt_all
+cnt_90d

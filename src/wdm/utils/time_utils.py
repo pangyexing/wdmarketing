@@ -28,30 +28,77 @@ def to_yyyymmdd_int(series):
     return arr
 
 
-def split_by_yyyymmdd(series, ratios):
-    """Return three boolean masks (train, valid, oot) by sorting and slicing.
+def _embargo_window_mask(vals, valid, cut_day, embargo_days):
+    """Rows whose day falls in (cut_day, cut_day + embargo_days] calendar days."""
+    cut_dt = pd.Timestamp(str(int(cut_day)))
+    end_int = int((cut_dt + pd.Timedelta(days=int(embargo_days))).strftime("%Y%m%d"))
+    return valid & (vals > cut_day) & (vals <= end_int)
 
-    ratios: e.g., [0.7, 0.15, 0.15].
-    Ties at boundary go to the earlier split.
+
+def split_by_yyyymmdd(series, ratios, embargo_days=0):
+    """Return three boolean masks (train, valid, oot) by time order.
+
+    ratios: e.g., [0.7, 0.15, 0.15]. Cut points are snapped to calendar-day
+    boundaries — the same guarantee build_forward_chaining_folds gives the CV
+    folds — so a single day never straddles two splits; the whole boundary
+    day goes to the earlier split. Rows with a NaN time value go to oot
+    (legacy behavior). With fewer than 3 distinct days the split falls back
+    to the legacy row-rank cut (a day may then straddle splits; embargo is
+    not applied).
+
+    embargo_days: purge gap after each cut day. Rows within embargo_days
+    calendar days after the train/valid or valid/oot cut are excluded from
+    every mask — use when the label is defined over a forward-looking window
+    so boundary rows' outcome windows don't overlap the next split.
     """
     if len(ratios) != 3:
         raise ValueError("ratios must have 3 elements")
     if abs(sum(ratios) - 1.0) > 1e-6:
         raise ValueError("ratios must sum to 1.0")
     ser = pd.Series(series).reset_index(drop=True)
+    n_total = ser.size
     ints = pd.Series(to_yyyymmdd_int(ser), index=ser.dropna().index)
     ints = ints.reindex(ser.index)  # preserve original length; NaN rows become NaN
-    order = ints.rank(method="first", na_option="bottom").values
-    n_total = ser.size
-    n_tr = int(round(ratios[0] * n_total))
-    n_va = int(round(ratios[1] * n_total))
-    n_tr = max(1, n_tr)
-    n_va = max(1, n_va)
-    n_oot = max(1, n_total - n_tr - n_va)
-    # order is 1-indexed rank
-    mask_tr = order <= n_tr
-    mask_va = (order > n_tr) & (order <= n_tr + n_va)
-    mask_oot = order > (n_tr + n_va)
+    vals = ints.values.astype(np.float64)
+    valid = ~np.isnan(vals)
+    days, counts = np.unique(vals[valid], return_counts=True)
+
+    if days.size < 3:
+        logger.warning("split_by_yyyymmdd: only %d distinct day(s) — falling "
+                       "back to the row-rank split (days may straddle splits).",
+                       days.size)
+        order = ints.rank(method="first", na_option="bottom").values
+        n_tr = max(1, int(round(ratios[0] * n_total)))
+        n_va = max(1, int(round(ratios[1] * n_total)))
+        mask_tr = order <= n_tr
+        mask_va = (order > n_tr) & (order <= n_tr + n_va)
+        mask_oot = order > (n_tr + n_va)
+        return mask_tr, mask_va, mask_oot
+
+    # Day whose cumulative row count first reaches each target closes that
+    # split (ties at the boundary go to the earlier split). Clamps keep at
+    # least one whole day in valid and in oot.
+    cum = np.cumsum(counts)
+    n_tr = max(1, int(round(ratios[0] * n_total)))
+    n_va = max(1, int(round(ratios[1] * n_total)))
+    pos1 = int(min(max(np.searchsorted(cum, n_tr), 0), days.size - 3))
+    pos2 = int(min(max(np.searchsorted(cum, n_tr + n_va), pos1 + 1), days.size - 2))
+    cut1 = days[pos1]
+    cut2 = days[pos2]
+
+    mask_tr = valid & (vals <= cut1)
+    mask_va = valid & (vals > cut1) & (vals <= cut2)
+    mask_oot = ~mask_tr & ~mask_va  # includes NaN-time rows (legacy behavior)
+
+    if embargo_days and int(embargo_days) > 0:
+        purge = (_embargo_window_mask(vals, valid, cut1, embargo_days)
+                 | _embargo_window_mask(vals, valid, cut2, embargo_days))
+        n_purged = int((purge & (mask_va | mask_oot)).sum())
+        if n_purged:
+            logger.info("split_by_yyyymmdd: embargo_days=%d purged %d boundary "
+                        "rows from valid/oot.", int(embargo_days), n_purged)
+        mask_va = mask_va & ~purge
+        mask_oot = mask_oot & ~purge
     return mask_tr, mask_va, mask_oot
 
 

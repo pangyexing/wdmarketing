@@ -119,7 +119,8 @@ def _split_masks(df, cfg):
         time_col = cfg["data"].get("time_column")
         if not time_col:
             raise ValueError("split.strategy='time' requires data.time_column")
-        return split_by_yyyymmdd(df[time_col], ratios)
+        return split_by_yyyymmdd(df[time_col], ratios,
+                                 embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
     raise ValueError("Unknown split strategy: {0}".format(strategy))
 
 

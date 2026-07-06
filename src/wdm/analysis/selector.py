@@ -216,6 +216,11 @@ def rank_and_auto_keep(df, cfg):
     #              analysis.psi_penalty_weight (default 0.25 — meaningfully
     #              smaller than z(iv) / z(lift_at_k) / z(gini) each at 1.0)
     w_psi = float(w["psi"]) if "psi" in w else psi_weight
+    if "psi" in w and abs(w_psi - psi_weight) > 1e-12:
+        logger.info("analysis.rank_weights.psi=%.3f overrides "
+                    "analysis.psi_penalty_weight=%.3f (rank_weights.psi is "
+                    "the single source of the PSI coefficient when set).",
+                    w_psi, psi_weight)
     effective_psi_weight = 0.0 if psi_mode == "off" else w_psi
     conc_term = (w_conc * _zscore(df["concentration"])
                  if "concentration" in df.columns else 0.0)

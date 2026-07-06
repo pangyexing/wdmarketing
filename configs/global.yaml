@@ -75,6 +75,20 @@ analysis:
   psi_cutoff: 0.25
   psi_mode: soft
   psi_penalty_weight: 0.25       # weight on z(psi) in rank_score (was effectively 1.0)
+  # PSI expected/actual partition:
+  #   halves        : earlier vs later half by median day (generic drift check)
+  #   train_vs_rest : train split vs valid+oot per training.split — measures
+  #                   the drift the model actually faces at deployment.
+  #                   Recommended for time-split products.
+  # Without a time column, PSI falls back to random halves and psi_mode is
+  # forced to 'off' for the run (noise must not move rank_score).
+  psi_partition: halves
+  # Which rows fit the supervised Stage-1 stats (IV/WOE bins, Lift@K, Gini):
+  #   train_only (default) : the training.split train rows only — valid/OOT
+  #                          labels never influence feature selection.
+  #   full                 : legacy behavior (all rows; leaks OOT labels into
+  #                          selection — keep only for reproducing old runs).
+  supervised_stats_split: train_only
   iv_min: 0.02
   corr_cutoff: 0.95
   n_bins: 10
@@ -107,7 +121,10 @@ analysis:
       max_depth: 6
       eta: 0.1
       subsample: 0.8
-      colsample_bytree: 0.8
+      # Column sampling is deliberately NOT set here: the code default is
+      # colsample_bynode=0.8 (per-node resampling — better for high-dim
+      # sparse inputs than per-tree; see probing.py _DEFAULT_XGB_PARAMS).
+      # Setting colsample_bytree here would ADD to bynode, not replace it.
       min_child_weight: 1.0
       lambda: 1.0
       verbosity: 0
@@ -138,7 +155,12 @@ analysis:
     n_actual_runs: 3             # real-label trainings averaged into actual gain
     n_null_runs: 30              # shuffled-label trainings forming the null distribution
     n_boost_rounds: 100
-    keep_percentile: 75          # keep features whose actual gain > null percentile
+    # Keep features whose actual gain exceeds this percentile of their own
+    # null distribution. 95 keeps the screen honest (~5% of pure-noise
+    # features pass by construction); the old default of 75 let ~25% of
+    # noise through. Lower it only when the candidate pool is so small that
+    # the screen must be lenient.
+    keep_percentile: 95
     importance_type: gain
     max_features: null           # null -> training.final_feature_count
     out_version: v2_model
@@ -243,6 +265,11 @@ training:
   split:
     strategy: stratified         # stratified | time
     ratios: [0.70, 0.15, 0.15]
+    # Purge gap (calendar days) after the train/valid and valid/oot cut days
+    # for time splits: rows inside the gap belong to no split. Set to the
+    # label's forward observation window so boundary rows' outcomes cannot
+    # overlap the next split. 0 = disabled.
+    embargo_days: 0
 
 export:
   validation_sample_count: 100

@@ -9,6 +9,7 @@ for backward compatibility.
 """
 import datetime
 import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -44,7 +45,7 @@ from wdm.utils.paths import (
     load_column_mapping, report_dir, selected_features_dir,
 )
 from wdm.utils.progress import StageProgress
-from wdm.utils.time_utils import split_psi_halves
+from wdm.utils.time_utils import split_by_yyyymmdd, split_psi_halves, split_stratified
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,7 @@ document.querySelectorAll('table').forEach(tbl => {
 
 
 def write_auto_features_txt(df, out_path, top_n, report_hash, parent=None,
-                            source="analysis/selector.py"):
+                            source="pipeline/stage1.py"):
     auto = df[df["auto_keep"] == True].copy()
     auto = auto.sort_values("rank_score", ascending=False).head(top_n)
     header = [
@@ -178,17 +179,51 @@ def write_auto_features_txt(df, out_path, top_n, report_hash, parent=None,
     return out_path
 
 
-def _load_probing_importance(cfg):
-    """Return the probing importance DataFrame, or None if not present.
+def _probing_is_stale(cfg, meta_path):
+    """True when probing_meta.json's cache fingerprint no longer matches the
+    configured train CSV — i.e. probing_importance.csv was produced from
+    different data and must not be merged into rank_score.
+    """
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Unreadable %s (%s) — treating probing output as stale.",
+                       meta_path, e)
+        return True
+    fp = meta.get("cache_fingerprint") or {}
+    if fp.get("csv_size_bytes") is None:
+        return False  # older probing runs recorded no fingerprint; trust them
+    csv_path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
+    if not csv_path.is_file():
+        return False
+    st = csv_path.stat()
+    return (fp.get("csv_size_bytes") != st.st_size
+            or abs(float(fp.get("csv_mtime", 0)) - st.st_mtime) > 1e-3)
 
-    The probing step writes probing_importance.csv into the report directory
-    before run_stage1 touches selector output. We read it lazily so Stage 1
-    still runs end-to-end when probing is disabled.
+
+def _load_probing_importance(cfg):
+    """Return the probing importance DataFrame, or None if absent/stale.
+
+    The probing step writes probing_importance.csv + probing_meta.json into
+    the report directory before run_stage1 touches selector output. The meta
+    fingerprint guards against a leftover CSV from an older run (different
+    data / feature set) silently leaking into rank_score.
     """
     rdir = report_dir(cfg)
     p = rdir / "probing_importance.csv"
     if not p.is_file():
         return None
+    meta_path = rdir / "probing_meta.json"
+    if meta_path.is_file():
+        if _probing_is_stale(cfg, meta_path):
+            logger.warning(
+                "probing_importance.csv at %s is STALE (source CSV changed "
+                "since probing ran) — ignoring the probing signal. Re-run "
+                "probing (scripts/run_analysis.py --probing) to refresh.", p)
+            return None
+    else:
+        logger.warning("probing_meta.json missing next to %s — freshness "
+                       "cannot be verified; using the file as-is.", p)
     try:
         df = pd.read_csv(p)
     except Exception as e:  # pragma: no cover - defensive
@@ -264,16 +299,63 @@ def run_stage1(cfg):
         meta_df = pd.read_csv(path, usecols=meta_cols)
         y = meta_df[label_col]
 
-        # PSI expected/actual masks — by time when available, else random
-        # halves as a placeholder.
-        if time_col and time_col in meta_df.columns:
-            m_e, m_a = split_psi_halves(meta_df[time_col])
+        # Train/valid/oot masks following cfg.training.split — used for the
+        # supervised-stats mask and (optionally) the PSI partition.
+        split_cfg = cfg["training"].get("split") or {}
+        ratios = list(split_cfg.get("ratios", [0.70, 0.15, 0.15]))
+        seed = int(cfg["training"].get("random_seed", 42))
+        if split_cfg.get("strategy") == "time" and time_col:
+            m_tr, m_va, m_oot = split_by_yyyymmdd(meta_df[time_col], ratios)
         else:
-            rng = np.random.RandomState(cfg["training"]["random_seed"])
+            m_tr, m_va, m_oot = split_stratified(y, ratios, seed=seed)
+        m_tr = np.asarray(m_tr, dtype=bool)
+
+        # Supervised statistics (IV/WOE bins, Lift@K, Gini) are fit on the
+        # train split only, so valid/OOT labels never influence which
+        # features are selected. analysis.supervised_stats_split: full
+        # restores the legacy full-data behavior.
+        sup_mode = str(cfg["analysis"].get("supervised_stats_split",
+                                           "train_only")).lower()
+        if sup_mode == "train_only":
+            supervised_mask = m_tr
+            logger.info("Supervised Stage-1 stats (IV/Lift/Gini + bin edges) "
+                        "fit on the train split only: %d/%d rows (split=%s).",
+                        int(m_tr.sum()), len(meta_df),
+                        split_cfg.get("strategy", "stratified"))
+        else:
+            supervised_mask = None
+            logger.info("analysis.supervised_stats_split=full — supervised "
+                        "Stage-1 stats use ALL rows (valid/OOT labels "
+                        "included in feature selection).")
+
+        # PSI expected/actual masks.
+        #   halves (default)  : earlier vs later half by median day — a
+        #                       generic drift check.
+        #   train_vs_rest     : train split vs valid+oot — measures the drift
+        #                       the model actually faces at deployment.
+        # Without a time column any partition is noise: compute PSI on random
+        # halves for the report, but force psi_mode='off' (local copy) so the
+        # noise cannot move rank_score or drop features.
+        psi_partition = str(cfg["analysis"].get("psi_partition", "halves")).lower()
+        if time_col and time_col in meta_df.columns:
+            if psi_partition == "train_vs_rest":
+                m_e, m_a = m_tr, np.asarray(m_va | m_oot, dtype=bool)
+                logger.info("PSI partition: train split (n=%d) vs valid+oot "
+                            "(n=%d).", int(m_e.sum()), int(m_a.sum()))
+            else:
+                m_e, m_a = split_psi_halves(meta_df[time_col])
+        else:
+            rng = np.random.RandomState(seed)
             r = rng.rand(len(meta_df))
             m_e, m_a = (r < 0.5), (r >= 0.5)
-            logger.warning("No time_column configured — PSI computed on random halves "
-                           "(useful only as a smoke check).")
+            cfg = dict(cfg)
+            cfg["analysis"] = dict(cfg["analysis"])
+            cfg["analysis"]["psi_mode"] = "off"
+            logger.warning(
+                "No time_column configured — PSI is computed on RANDOM halves "
+                "(pure noise) and reported for reference only; psi_mode forced "
+                "to 'off' for this run so it cannot affect rank_score or "
+                "filtering.")
 
     n_chunks = (len(features) + chunk_size - 1) // chunk_size
     logger.info("Stage 1 starting: %d features × %d rows (%d column chunks)",
@@ -289,7 +371,8 @@ def run_stage1(cfg):
                 cache_dir = _make_scan_cache_dir(cfg, scan_cache_cfg)
             scan = run_feature_scan(path, features, y, m_e, m_a,
                                     spec_map, get_spec, cfg,
-                                    cache_dir=cache_dir)
+                                    cache_dir=cache_dir,
+                                    supervised_mask=supervised_mask)
             iv_df = scan.iv_df
             bin_specs = scan.bin_specs
             miss_df = scan.miss_df

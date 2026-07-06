@@ -87,7 +87,10 @@ def _score_oot(predictor, baseline_path, cfg):
             "Baseline {0} missing model features: {1}".format(
                 baseline_path, sorted(missing)[:5]))
     df = pd.read_csv(baseline_path, usecols=needed)
-    _, _, m_oot = split_by_yyyymmdd(df[time_col], cfg["training"]["split"]["ratios"])
+    split_cfg = cfg["training"]["split"]
+    _, _, m_oot = split_by_yyyymmdd(
+        df[time_col], split_cfg["ratios"],
+        embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
     df_oot = df.loc[m_oot, predictor.base_features].copy()
     cd_time_oot = df.loc[m_oot, time_col].values
     logger.info("Scoring OOT: %d rows", len(df_oot))
