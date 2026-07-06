@@ -48,8 +48,8 @@ def _zscore(s):
     return (s.fillna(mu) - mu) / sigma
 
 
-def _build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic_df,
-                         cluster_map, cfg, probing_df=None):
+def build_ranked_report(iv_df, psi_df, lift_df, missing_df, family_df, semantic_df,
+                        cluster_map, cfg, probing_df=None):
     """Merge all per-feature tables on 'feature' into one.
 
     probing_df: optional DataFrame with columns (feature, gain, weight, cover,
@@ -102,7 +102,7 @@ def _resolve_psi_knobs(cfg):
     return mode, weight
 
 
-def _apply_hard_filters(df, cfg):
+def apply_hard_filters(df, cfg):
     miss_max = float(cfg["analysis"]["missing_rate_max"])
     iv_min = float(cfg["analysis"]["iv_min"])
     psi_cutoff = float(cfg["analysis"]["psi_cutoff"])
@@ -200,7 +200,7 @@ def _row_penalty_contribution(df, cfg):
     return df.apply(_score, axis=1).astype(float)
 
 
-def _rank_and_auto_keep(df, cfg):
+def rank_and_auto_keep(df, cfg):
     df = df.copy()
     psi_mode, psi_weight = _resolve_psi_knobs(cfg)
     w = (cfg.get("analysis") or {}).get("rank_weights") or {}
@@ -316,6 +316,20 @@ def _rank_and_auto_keep(df, cfg):
     return df.drop(columns=["_hard_drop", "_hard_drop_reason"], errors="ignore")
 
 
-# Backward-compatible entrypoint: the Stage-1 orchestration moved to
-# wdm.pipeline.stage1; existing callers keep importing it from here.
-from wdm.pipeline.stage1 import run_stage1  # noqa: E402,F401
+# Backward-compat aliases: these were module-private until the stage1
+# extraction made them cross-module API. Existing tests/callers import the
+# underscore names.
+_build_ranked_report = build_ranked_report
+_apply_hard_filters = apply_hard_filters
+_rank_and_auto_keep = rank_and_auto_keep
+
+
+def run_stage1(cfg):
+    """Backward-compatible entrypoint: the Stage-1 orchestration moved to
+    wdm.pipeline.stage1; existing callers keep importing it from here. The
+    import is deferred so selector never imports stage1 at module scope
+    (stage1 imports this module's scoring helpers — an eager import here
+    would recreate the circular import).
+    """
+    from wdm.pipeline.stage1 import run_stage1 as _run_stage1
+    return _run_stage1(cfg)

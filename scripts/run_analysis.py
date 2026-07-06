@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wdm.config import load_config
+from wdm.io.sparse_cache import resolve_cache_dir
 from wdm.pipeline.stage1 import run_stage1
 from wdm.utils.logging import setup_logging
 from wdm.utils.paths import ensure_dirs, report_dir
@@ -28,14 +29,6 @@ def _resolve_probing_enabled(cfg, cli_flag):
     return bool((cfg.get("analysis") or {}).get("probing", {}).get("enabled", False))
 
 
-def _resolve_cache_dir(cfg):
-    """Mirror scripts/build_sparse_cache._resolve_cache_dir to stay in sync."""
-    override = (cfg.get("analysis") or {}).get("probing", {}).get("cache_dir")
-    if override:
-        return Path(cfg["_repo_root"]) / override
-    return Path(cfg["_repo_root"]) / "data" / "cache" / cfg["name"]
-
-
 def _maybe_run_probing(cfg, enabled):
     """Run Stage-1 probing before run_stage1 so selector.py can pick up
     probing_importance.csv when computing rank_score.
@@ -44,7 +37,7 @@ def _maybe_run_probing(cfg, enabled):
         logger.info("Probing disabled — skipping.")
         return None
 
-    cache_dir = _resolve_cache_dir(cfg)
+    cache_dir = resolve_cache_dir(cfg)
     manifest = cache_dir / "manifest.json"
     if not manifest.is_file():
         print(

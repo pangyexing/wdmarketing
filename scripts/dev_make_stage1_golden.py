@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Regenerate the Stage-1 golden snapshot under tests/stage1_golden/expected/.
 
-Run this ONCE with the canonical analysis environment BEFORE refactoring,
-and re-run only when (a) the environment (numpy/pandas) changes, or (b) an
-intentional behavior change is made to Stage-1:
+Run this ONCE with the canonical analysis environment (env36 — see README
+"环境" for the $PY convention) BEFORE refactoring, and re-run only when
+(a) the environment (numpy/pandas) changes, or (b) an intentional behavior
+change is made to Stage-1:
 
-    PYTHONPATH=src /Users/pangyexing/miniconda3/envs/env_ml/bin/python \
-        scripts/dev_make_stage1_golden.py
+    PYTHONPATH=src $PY scripts/dev_make_stage1_golden.py
 
 tests/test_stage1_golden.py then asserts that the current code reproduces
 these artifacts byte-for-byte.

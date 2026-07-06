@@ -5,10 +5,10 @@ Consumes the Stage-1 feature list (default: selected_features.active_version)
 and writes a refined selected_features/<out_version>.txt (default v2_model).
 Stage-1 must have been run first for the product.
 
-Requires xgboost — run with the ML conda environment, e.g.:
+Requires xgboost — run with the ML conda environment (env36, see README
+"环境" for the $PY convention), e.g.:
 
-    PYTHONPATH=src /Users/pangyexing/miniconda3/envs/env_ml/bin/python \\
-        scripts/run_model_screen.py --product xc_e2e_credit
+    PYTHONPATH=src $PY scripts/run_model_screen.py --product xc_e2e_credit
 
 Then train on the refined list:
 

@@ -74,7 +74,7 @@ def run_null_importance(cfg, base_version=None, out_version=None,
             "xgboost is not available in this Python environment — run the "
             "model screen with the ML conda env (see scripts/run_model_screen.py).")
 
-    from wdm.pipeline.stage1 import _report_hash, _write_auto_features_txt
+    from wdm.pipeline.stage1 import report_hash, write_auto_features_txt
     from wdm.model.dataset import build_dataset
     from wdm.utils.paths import (
         analysis_dir, ensure_dirs, inject_cn_column, load_column_mapping,
@@ -169,10 +169,10 @@ def run_null_importance(cfg, base_version=None, out_version=None,
     sf_dir = selected_features_dir(cfg)
     ensure_dirs(sf_dir)
     out_path = sf_dir / "{0}.txt".format(out_version)
-    _write_auto_features_txt(out_df, out_path, top_n=top_n,
-                             report_hash=_report_hash(csv_path),
-                             parent=base_version,
-                             source="analysis/null_importance.py")
+    write_auto_features_txt(out_df, out_path, top_n=top_n,
+                            report_hash=report_hash(csv_path),
+                            parent=base_version,
+                            source="analysis/null_importance.py")
 
     n_kept_written = int(min(int(eligible["keep"].sum()), top_n))
     meta = {

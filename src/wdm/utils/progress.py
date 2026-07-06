@@ -73,20 +73,27 @@ class StageProgress:
         with prog.step("IV / WOE"):
             ...
         prog.finish()
+
+    total=None counts steps dynamically ("3/?" in the log lines) — use it when
+    the number of steps is conditional and a hand-maintained count would drift.
     """
 
-    def __init__(self, stage_name, total):
+    def __init__(self, stage_name, total=None):
         self.stage_name = stage_name
-        self.total = int(total)
+        self.total = int(total) if total is not None else None
         self.done = 0
         self.t0 = time.time()
+
+    @property
+    def total_label(self):
+        return str(self.total) if self.total is not None else "?"
 
     def step(self, name):
         return _Step(self, name)
 
     def finish(self):
         logger.info("[%s] all %d steps done in %s",
-                    self.stage_name, self.total,
+                    self.stage_name, self.done,
                     fmt_duration(time.time() - self.t0))
 
 
@@ -99,15 +106,15 @@ class _Step:
     def __enter__(self):
         self.prog.done += 1
         self.t_start = time.time()
-        logger.info("[%s %d/%d] %s ...",
-                    self.prog.stage_name, self.prog.done, self.prog.total,
+        logger.info("[%s %d/%s] %s ...",
+                    self.prog.stage_name, self.prog.done, self.prog.total_label,
                     self.name)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         status = "FAILED" if exc_type else "done"
-        logger.info("[%s %d/%d] %s %s in %s (total elapsed %s)",
-                    self.prog.stage_name, self.prog.done, self.prog.total,
+        logger.info("[%s %d/%s] %s %s in %s (total elapsed %s)",
+                    self.prog.stage_name, self.prog.done, self.prog.total_label,
                     self.name, status,
                     fmt_duration(time.time() - self.t_start),
                     fmt_duration(time.time() - self.prog.t0))

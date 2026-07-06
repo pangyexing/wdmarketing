@@ -17,13 +17,18 @@
 ## 环境
 
 ```
-Python 3.7
+Python 3.6.13（conda env `env36`；golden snapshot 即在此版本下生成）
 xgboost==1.5.0
 shap, hyperopt, numpy<1.20, pandas<1.2, scikit-learn<0.25, matplotlib<3.4
-pyyaml, jsonschema<4    # dataclasses is stdlib on 3.7
+pyyaml, jsonschema<4, dataclasses（3.6 需 backport，3.7+ 为标准库）
 ```
 
-安装：`pip install -r requirements.txt`
+安装：`pip install -r requirements.txt`，或用 conda 一步建环境：
+`conda env create -f environment.yaml`
+
+约定：文档与脚本中的 `$PY` 指 env36 的解释器
+（`conda run -n env36 python` 或 `~/miniconda3/envs/env36/bin/python`）。
+代码保持 3.6 兼容——不用 f-string、不用 PEP 562 模块级 `__getattr__`。
 
 ## 使用
 

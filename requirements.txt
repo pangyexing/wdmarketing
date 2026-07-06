@@ -1,6 +1,8 @@
-# Python 3.7 locked versions — see implementation-plan.md § Python 3.7 Compatibility
+# Python 3.6 locked versions (conda env `env36`, Python 3.6.13 — the version
+# the Stage-1 golden snapshot was generated under; see
+# tests/stage1_golden/expected/snapshot_meta.json).
 xgboost==1.5.0
-shap<0.42           # 0.41.0 happens to work on 3.7
+shap<0.42           # 0.41.0 happens to work on 3.6/3.7
 hyperopt<0.2.7
 py4j                # transitive for hyperopt.spark import guard
 numpy<1.20
@@ -10,6 +12,6 @@ matplotlib<3.4
 seaborn<0.12
 pyyaml
 jsonschema<4
-# dataclasses — stdlib since Python 3.7, no backport needed
-pytest<7            # last line pinned to 3.7-compatible; used by tests/ + verify script
+dataclasses; python_version < "3.7"   # stdlib from 3.7 on
+pytest<7            # last line pinned to 3.6-compatible; used by tests/ + verify script
 # openpyxl intentionally omitted — target machine may lack it; report falls back to CSV + HTML

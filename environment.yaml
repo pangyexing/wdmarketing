@@ -1,0 +1,14 @@
+# Conda environment for wdmarketing. Create with:
+#     conda env create -f environment.yaml
+# Matches the runtime the Stage-1 golden snapshot was generated under
+# (Python 3.6.13 / numpy 1.19.x / pandas 1.1.x — see
+# tests/stage1_golden/expected/snapshot_meta.json).
+name: env36
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.6.13
+  - pip
+  - pip:
+      - -r requirements.txt

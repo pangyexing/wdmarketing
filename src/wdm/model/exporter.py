@@ -25,6 +25,7 @@ import datetime
 import json
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List
 
@@ -39,6 +40,20 @@ from wdm.preprocess.missing import dump_missing_spec
 from wdm.utils.paths import load_column_mapping, model_run_dir, ensure_dirs
 
 logger = logging.getLogger(__name__)
+
+
+def _git_commit(repo_root):
+    """Current commit SHA (+'-dirty' if the tree has changes); None outside git."""
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
+            stderr=subprocess.DEVNULL).decode("ascii").strip()
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=str(repo_root),
+            stderr=subprocess.DEVNULL).decode("utf-8").strip()
+        return sha + ("-dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def _save_booster(cfg, booster, run_dir):
@@ -367,7 +382,10 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "selected_features_version": selected_features_version,
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "random_seed": cfg["training"]["random_seed"],
+        "git_commit": _git_commit(cfg["_repo_root"]),
         "xgb_version": xgb.__version__,
+        "numpy_version": np.__version__,
+        "pandas_version": pd.__version__,
         "best_iteration": best_iteration,
         "n_features_total": len(data.feature_list),
         "n_features_base": len(data.base_feature_list),

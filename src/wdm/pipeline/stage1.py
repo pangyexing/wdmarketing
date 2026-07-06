@@ -17,6 +17,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Pass-2 edge computation is called via the module (not bound at import time)
+# so tests can monkeypatch wdm.analysis.correlation regardless of import order.
+from wdm.analysis import correlation
 from wdm.analysis.correlation import cluster_correlated, cluster_id_per_feature
 from wdm.analysis.family import (
     apply_group_correlation,
@@ -28,11 +31,20 @@ from wdm.analysis.family import (
     rank_within_family,
     rank_within_semantic_group,
 )
+from wdm.analysis.feature_scan import run_feature_scan
+from wdm.analysis.selector import (
+    apply_hard_filters,
+    build_ranked_report,
+    rank_and_auto_keep,
+)
+from wdm.io.column_scanner import scan_columns
+from wdm.preprocess.missing import build_missing_spec, get_spec
 from wdm.utils.paths import (
     analysis_dir, ensure_dirs, inject_cn_column,
     load_column_mapping, report_dir, selected_features_dir,
 )
 from wdm.utils.progress import StageProgress
+from wdm.utils.time_utils import split_psi_halves
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +159,8 @@ document.querySelectorAll('table').forEach(tbl => {
     return out_path
 
 
-def _write_auto_features_txt(df, out_path, top_n, report_hash, parent=None,
-                             source="analysis/selector.py"):
+def write_auto_features_txt(df, out_path, top_n, report_hash, parent=None,
+                            source="analysis/selector.py"):
     auto = df[df["auto_keep"] == True].copy()
     auto = auto.sort_values("rank_score", ascending=False).head(top_n)
     header = [
@@ -186,12 +198,18 @@ def _load_probing_importance(cfg):
     return df
 
 
-def _report_hash(summary_csv_path):
+def report_hash(summary_csv_path):
     h = hashlib.sha1()
     with open(summary_csv_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()[:12]
+
+
+# Backward-compat aliases: null_importance (and older callers) imported the
+# underscore names before these became cross-module API.
+_write_auto_features_txt = write_auto_features_txt
+_report_hash = report_hash
 
 
 def _make_scan_cache_dir(cfg, scan_cache_cfg):
@@ -226,15 +244,6 @@ def run_stage1(cfg):
 
     Returns a dict summarizing what was written.
     """
-    from wdm.analysis.correlation import (
-        compute_correlation_edges, compute_edges_from_cache)
-    from wdm.analysis.selector import (
-        _apply_hard_filters, _build_ranked_report, _rank_and_auto_keep)
-    from wdm.analysis.feature_scan import run_feature_scan
-    from wdm.io.column_scanner import scan_columns
-    from wdm.preprocess.missing import build_missing_spec, get_spec
-    from wdm.utils.time_utils import split_psi_halves
-
     prog = StageProgress("Stage 1", total=5)
 
     with prog.step("scan columns + load label/time"):
@@ -292,7 +301,7 @@ def run_stage1(cfg):
             corr_threshold = float(cfg["analysis"]["corr_cutoff"])
             min_overlap = float(cfg["analysis"].get("corr_min_overlap_frac", 0.10))
             if cache_dir is not None:
-                edges = compute_edges_from_cache(
+                edges = correlation.compute_edges_from_cache(
                     features, scan.blocks, cache_dir,
                     scan.col_count, scan.col_sum, scan.col_sum_sq, scan.n_rows,
                     threshold=corr_threshold, min_overlap_frac=min_overlap,
@@ -300,7 +309,7 @@ def run_stage1(cfg):
             else:
                 # Fallback path: re-reads the CSV per block pair — much slower,
                 # but needs no scratch disk.
-                edges = compute_correlation_edges(
+                edges = correlation.compute_correlation_edges(
                     features, path, always=[label_col],
                     spec_map=spec_map, get_spec_fn=get_spec,
                     chunk_size=chunk_size, threshold=corr_threshold,
@@ -323,9 +332,9 @@ def run_stage1(cfg):
         probing_df = _load_probing_importance(cfg)
 
         # Merge into a report base; rank within family/group; cluster
-        base = _build_ranked_report(iv_df, psi_df, lift_df, miss_df,
-                                    family_df, semantic_df, cluster_map={}, cfg=cfg,
-                                    probing_df=probing_df)
+        base = build_ranked_report(iv_df, psi_df, lift_df, miss_df,
+                                   family_df, semantic_df, cluster_map={}, cfg=cfg,
+                                   probing_df=probing_df)
         base = rank_within_family(base, cfg)
         base = rank_within_semantic_group(base, cfg)
 
@@ -336,8 +345,8 @@ def run_stage1(cfg):
         base["corr_cluster"] = base["feature"].map(cmap).fillna(-1).astype(int)
 
         # Hard filters → rank_score → auto_keep → drop_reason
-        base = _apply_hard_filters(base, cfg)
-        base = _rank_and_auto_keep(base, cfg)
+        base = apply_hard_filters(base, cfg)
+        base = rank_and_auto_keep(base, cfg)
 
     with prog.step("write report artifacts"):
         # Column ordering + 中文列名
@@ -382,23 +391,32 @@ def run_stage1(cfg):
         logger.info("Derivation candidates: %d multi-window families flagged → %s",
                     len(cand_df), rdir / "family_derivation_candidates.csv")
 
-        # Optional XLSX — only if openpyxl happens to be available
+        # Optional XLSX — only if openpyxl happens to be available. A missing
+        # package is an expected skip; any other failure (disk full,
+        # permissions) is a real error and must be visible as such.
         try:
             import openpyxl  # noqa: F401
-            xlsx_path = analysis_dir(cfg) / "feature_report.xlsx"
-            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
-                summary.to_excel(w, sheet_name="Summary", index=False)
-                iv_out.to_excel(w, sheet_name="IV_WOE", index=False)
-                psi_out.to_excel(w, sheet_name="PSI", index=False)
-                lift_out.to_excel(w, sheet_name="Lift", index=False)
-                miss_out.to_excel(w, sheet_name="Missing", index=False)
-                edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
-                fam_summary.to_excel(w, sheet_name="Families", index=False)
-                sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
-                cand_df.to_excel(w, sheet_name="DerivationCandidates", index=False)
-            logger.info("Wrote optional XLSX: %s", xlsx_path)
-        except Exception as e:
-            logger.info("Skipped XLSX generation: %s", e)
+        except ImportError:
+            openpyxl = None
+            logger.info("Skipped XLSX generation: openpyxl not installed "
+                        "(CSV + HTML reports are complete).")
+        if openpyxl is not None:
+            try:
+                xlsx_path = analysis_dir(cfg) / "feature_report.xlsx"
+                with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
+                    summary.to_excel(w, sheet_name="Summary", index=False)
+                    iv_out.to_excel(w, sheet_name="IV_WOE", index=False)
+                    psi_out.to_excel(w, sheet_name="PSI", index=False)
+                    lift_out.to_excel(w, sheet_name="Lift", index=False)
+                    miss_out.to_excel(w, sheet_name="Missing", index=False)
+                    edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
+                    fam_summary.to_excel(w, sheet_name="Families", index=False)
+                    sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
+                    cand_df.to_excel(w, sheet_name="DerivationCandidates", index=False)
+                logger.info("Wrote optional XLSX: %s", xlsx_path)
+            except Exception:
+                logger.warning("XLSX generation failed (CSV + HTML reports "
+                               "are complete):", exc_info=True)
 
         _write_index_html(rdir, mapping)
 
@@ -415,8 +433,8 @@ def run_stage1(cfg):
         candidate_n = training_cfg.get("stage2_candidate_count")
         funnel_n = int(candidate_n) if candidate_n and int(candidate_n) > final_n else final_n
         top_n = int(cfg["analysis"].get("stage1_top_n") or funnel_n)
-        rh = _report_hash(summary_path)
-        _write_auto_features_txt(summary, auto_path, top_n=top_n, report_hash=rh)
+        rh = report_hash(summary_path)
+        write_auto_features_txt(summary, auto_path, top_n=top_n, report_hash=rh)
 
     prog.finish()
     logger.info("Stage 1 done. Report: %s  Auto features: %s", rdir, auto_path)
