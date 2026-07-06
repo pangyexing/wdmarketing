@@ -28,7 +28,8 @@ section() { echo; echo "===== $* ====="; }
 
 # ─── 0. Environment & data presence ─────────────────────────────
 section "0. Environment & data"
-python3 -c "import sys; assert sys.version_info[:2]>=(3,7), sys.version"
+# Canonical env is Python 3.6.13 (conda env36 — see README 环境).
+python3 -c "import sys; assert sys.version_info[:2]>=(3,6), sys.version"
 pip install -q -r requirements.txt
 python3 -c "import xgboost; assert xgboost.__version__.startswith('1.5.'), xgboost.__version__; print('xgb ok')"
 test -s data/home_credit_wide.csv || {
@@ -90,7 +91,9 @@ python3 scripts/run_training.py \
 R2=artifacts/home_credit/models/verify
 for f in booster.json feature_list.txt missing_spec.json metrics.json \
          importance.csv predict.py validation_samples.csv run_manifest.json \
-         plots/roc.png plots/pr.png plots/ks.png plots/shap_bar.png; do
+         calibration.json \
+         plots/roc_pr.png plots/ks.png plots/lift_decile.png \
+         plots/importance_gain.png; do
   test -s "$R2/$f" || { echo "MISS $R2/$f"; exit 1; }
 done
 
@@ -126,31 +129,32 @@ if [[ "$SMOKE" != "1" ]]; then
 fi
 
 # ─── 6. Tamper test ─────────────────────────────────────────────
+# Swap the first and last feature lines: a reordered feature_list.txt keeps
+# the column COUNT intact (so the Predictor's consistency guard stays quiet)
+# but feeds the booster a permuted matrix — --validate must catch the score
+# drift. Strategy-independent, unlike mutating fill values (keep_nan products
+# replay no fills at all).
 section "6. Tamper test (should FAIL --validate)"
-cp "$R2/missing_spec.json" "$R2/missing_spec.json.bak"
+cp "$R2/feature_list.txt" "$R2/feature_list.txt.bak"
 python3 - <<PY
-import json
-p = '$R2/missing_spec.json'
-d = json.load(open(p))
-fitted = d.get('fitted', {})
-touched = False
-for col, spec in fitted.items():
-    if isinstance(spec, dict) and 'value' in spec:
-        spec['value'] = (spec['value'] or 0) + 1000
-        touched = True
-        break
-if not touched:
-    d['global']['fill_constant'] = -12345
-json.dump(d, open(p, 'w'))
-print('tampered ok')
+p = '$R2/feature_list.txt'
+with open(p, 'r', encoding='utf-8') as f:
+    lines = f.read().splitlines()
+idx = [i for i, ln in enumerate(lines) if ln.strip() and not ln.startswith('#')]
+assert len(idx) >= 2, 'need at least two features to tamper'
+i, j = idx[0], idx[-1]
+lines[i], lines[j] = lines[j], lines[i]
+with open(p, 'w', encoding='utf-8') as f:
+    f.write('\n'.join(lines) + '\n')
+print('tampered ok (swapped %s <-> %s)' % (lines[j], lines[i]))
 PY
 if python3 "$R2/predict.py" --validate --tol 1e-6 2>/dev/null; then
-  echo 'FAIL: --validate passed after tampering (missing rules not actually replayed)'
-  mv "$R2/missing_spec.json.bak" "$R2/missing_spec.json"
+  echo 'FAIL: --validate passed after tampering (feature order not actually honored)'
+  mv "$R2/feature_list.txt.bak" "$R2/feature_list.txt"
   exit 1
 fi
-mv "$R2/missing_spec.json.bak" "$R2/missing_spec.json"
-echo 'Tamper test ok — --validate correctly rejected tampered missing_spec'
+mv "$R2/feature_list.txt.bak" "$R2/feature_list.txt"
+echo 'Tamper test ok — --validate correctly rejected the reordered feature list'
 
 echo
 echo '✅ home_credit ALL CHECKS PASSED'
