@@ -17,10 +17,10 @@
 ## 环境
 
 ```
-Python 3.6.13（conda env `env36`；golden snapshot 即在此版本下生成）
+Python 3.6.13（conda env `env36`；golden snapshot 即在此版本下生成）/ 3.7.16（env37，已验证同样通过）
 xgboost==1.5.0
-shap, hyperopt, numpy<1.20, pandas<1.2, scikit-learn<0.25, matplotlib<3.4
-pyyaml, jsonschema<4, dataclasses（3.6 需 backport，3.7+ 为标准库）
+shap, hyperopt, numpy<1.20, pandas<1.2, scipy<1.6, scikit-learn<0.25, matplotlib<3.4
+pyyaml, dataclasses（3.6 需 backport，3.7+ 为标准库）
 ```
 
 安装：`pip install -r requirements.txt`，或用 conda 一步建环境：

@@ -1,17 +1,18 @@
-# Python 3.6 locked versions (conda env `env36`, Python 3.6.13 — the version
-# the Stage-1 golden snapshot was generated under; see
-# tests/stage1_golden/expected/snapshot_meta.json).
+# Locked versions for conda envs `env36` (Python 3.6.13 — the version the Stage-1
+# golden snapshot was generated under; see tests/stage1_golden/expected/snapshot_meta.json)
+# and `env37` (Python 3.7.16). Verified 2026-07-08: the same pins resolve to
+# identical wheels on both interpreters (scipy 1.5.4 / numpy 1.19.5 / pandas 1.1.5
+# / xgboost 1.5.0 / shap 0.41.0 …) and the full test suite passes 193/193 under each.
 xgboost==1.5.0
 shap<0.42           # 0.41.0 happens to work on 3.6/3.7
 hyperopt<0.2.7
 py4j                # transitive for hyperopt.spark import guard
 numpy<1.20
 pandas<1.2
+scipy<1.6           # 1.5.4; direct import in io/sparse_cache.py (scipy.sparse), also a sklearn/xgboost transitive dep. <1.6 keeps 3.6/3.7 on the golden's 1.5.4
 scikit-learn<0.25
 matplotlib<3.4
-seaborn<0.12
 pyyaml
-jsonschema<4
 dataclasses; python_version < "3.7"   # stdlib from 3.7 on
 pytest<7            # last line pinned to 3.6-compatible; used by tests/ + verify script
 # openpyxl intentionally omitted — target machine may lack it; report falls back to CSV + HTML
