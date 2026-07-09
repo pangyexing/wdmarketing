@@ -26,7 +26,6 @@ from wdm.analysis.family import (
     apply_group_correlation,
     build_families_summary,
     build_semantic_groups_summary,
-    discover_derivation_candidates,
     parse_families,
     parse_semantic_groups,
     rank_within_family,
@@ -44,8 +43,10 @@ from wdm.utils.paths import (
     analysis_dir, ensure_dirs, inject_cn_column,
     load_column_mapping, report_dir, selected_features_dir,
 )
+from wdm.utils.labels import validate_binary_label
 from wdm.utils.progress import StageProgress
-from wdm.utils.time_utils import split_by_yyyymmdd, split_psi_halves, split_stratified
+from wdm.utils.split_masks import compute_split_masks, scatter_masks
+from wdm.utils.time_utils import split_psi_halves
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,7 @@ def _write_index_html(report_dir_path, mapping):
     """
     report_dir_path = Path(report_dir_path)
     csvs = sorted([p.name for p in report_dir_path.glob("*.csv")])
-    summary_first = ["summary.csv", "families.csv",
-                     "family_derivation_candidates.csv", "semantic_groups.csv",
+    summary_first = ["summary.csv", "families.csv", "semantic_groups.csv",
                      "probing_importance.csv",
                      "iv_woe.csv", "psi.csv", "lift.csv", "missing.csv",
                      "correlation_edges.csv"]
@@ -291,24 +291,26 @@ def run_stage1(cfg):
         spec_map = build_missing_spec(cfg)
         chunk_size = int(cfg["io"]["column_chunk_size"])
 
-        # Only the label and time columns are needed up-front; feature columns
-        # stream through the single-pass chunked scan below.
+        # Only the label, time and exclude-rule columns are needed up-front;
+        # feature columns stream through the single-pass chunked scan below.
+        exclude_rows = cfg["data"].get("exclude_rows") or []
         meta_cols = [label_col]
         if time_col and time_col != label_col:
             meta_cols.append(time_col)
+        for rule in exclude_rows:
+            if rule["column"] not in meta_cols:
+                meta_cols.append(rule["column"])
         meta_df = pd.read_csv(path, usecols=meta_cols)
         y = meta_df[label_col]
 
-        # Train/valid/oot masks following cfg.training.split — used for the
-        # supervised-stats mask and (optionally) the PSI partition.
+        # Train/valid/oot masks shared with Stage-2 (wdm.utils.split_masks):
+        # exclude_rows filtering and embargo purging match build_dataset
+        # exactly, so every fitted Stage-1 statistic sees the same "train"
+        # rows the final model trains on.
         split_cfg = cfg["training"].get("split") or {}
-        ratios = list(split_cfg.get("ratios", [0.70, 0.15, 0.15]))
         seed = int(cfg["training"].get("random_seed", 42))
-        if split_cfg.get("strategy") == "time" and time_col:
-            m_tr, m_va, m_oot = split_by_yyyymmdd(meta_df[time_col], ratios)
-        else:
-            m_tr, m_va, m_oot = split_stratified(y, ratios, seed=seed)
-        m_tr = np.asarray(m_tr, dtype=bool)
+        m_tr, m_va, m_oot, included = compute_split_masks(meta_df, cfg)
+        validate_binary_label(y[included], label_col)
 
         # Supervised statistics (IV/WOE bins, Lift@K, Gini) are fit on the
         # train split only, so valid/OOT labels never influence which
@@ -323,31 +325,68 @@ def run_stage1(cfg):
                         int(m_tr.sum()), len(meta_df),
                         split_cfg.get("strategy", "stratified"))
         else:
-            supervised_mask = None
+            # "full" restores the legacy all-rows behavior for the labels,
+            # but rows dropped by data.exclude_rows still never enter any
+            # fitted statistic.
+            supervised_mask = included if exclude_rows else None
             logger.info("analysis.supervised_stats_split=full — supervised "
                         "Stage-1 stats use ALL rows (valid/OOT labels "
                         "included in feature selection).")
 
+        # Label-free selection statistics (missing rate → hard filter,
+        # correlation → which cluster member survives de-duplication) follow
+        # the same train-only discipline by default; `full` restores the
+        # legacy all-rows behavior.
+        unsup_mode = str(cfg["analysis"].get("unsupervised_stats_split",
+                                             "train_only")).lower()
+        if unsup_mode == "train_only":
+            unsupervised_mask = m_tr
+            logger.info("Unsupervised Stage-1 stats (missing rate, "
+                        "correlation) computed on the train split only: "
+                        "%d/%d rows.", int(m_tr.sum()), len(meta_df))
+        else:
+            unsupervised_mask = included if exclude_rows else None
+            logger.info("analysis.unsupervised_stats_split=full — missing "
+                        "rate and correlation use ALL rows (valid/OOT "
+                        "feature distributions influence selection).")
+
         # PSI expected/actual masks.
-        #   halves (default)  : earlier vs later half by median day — a
-        #                       generic drift check.
-        #   train_vs_rest     : train split vs valid+oot — measures the drift
-        #                       the model actually faces at deployment.
+        #   train_halves (default): earlier vs later half WITHIN the train
+        #                       split — a drift signal that can feed
+        #                       rank_score without valid/OOT feature rows
+        #                       influencing selection.
+        #   halves            : earlier vs later half of the whole window
+        #                       (legacy; includes valid/OOT rows).
+        #   train_vs_rest     : train split vs valid+oot — the drift the
+        #                       model actually faces at deployment. Explicit
+        #                       opt-in: with psi_mode soft/hard this lets
+        #                       valid/OOT feature distributions move
+        #                       rank_score — deliberate, config-visible.
         # Without a time column any partition is noise: compute PSI on random
         # halves for the report, but force psi_mode='off' (local copy) so the
         # noise cannot move rank_score or drop features.
-        psi_partition = str(cfg["analysis"].get("psi_partition", "halves")).lower()
+        psi_partition = str(cfg["analysis"].get("psi_partition",
+                                                "train_halves")).lower()
         if time_col and time_col in meta_df.columns:
             if psi_partition == "train_vs_rest":
                 m_e, m_a = m_tr, np.asarray(m_va | m_oot, dtype=bool)
                 logger.info("PSI partition: train split (n=%d) vs valid+oot "
-                            "(n=%d).", int(m_e.sum()), int(m_a.sum()))
-            else:
-                m_e, m_a = split_psi_halves(meta_df[time_col])
+                            "(n=%d) — deployment-facing drift; valid/OOT "
+                            "rows DO enter the selection PSI.",
+                            int(m_e.sum()), int(m_a.sum()))
+            elif psi_partition == "halves":
+                m_e, m_a = scatter_masks(
+                    included, split_psi_halves(meta_df[time_col][included]))
+            else:  # train_halves
+                m_e, m_a = scatter_masks(
+                    m_tr, split_psi_halves(meta_df[time_col][m_tr]))
+                logger.info("PSI partition: train-split halves (%d vs %d "
+                            "rows) — valid/OOT rows never enter the "
+                            "selection PSI.", int(m_e.sum()), int(m_a.sum()))
         else:
             rng = np.random.RandomState(seed)
             r = rng.rand(len(meta_df))
-            m_e, m_a = (r < 0.5), (r >= 0.5)
+            m_e, m_a = (r < 0.5) & included, (r >= 0.5) & included
             cfg = dict(cfg)
             cfg["analysis"] = dict(cfg["analysis"])
             cfg["analysis"]["psi_mode"] = "off"
@@ -372,7 +411,8 @@ def run_stage1(cfg):
             scan = run_feature_scan(path, features, y, m_e, m_a,
                                     spec_map, get_spec, cfg,
                                     cache_dir=cache_dir,
-                                    supervised_mask=supervised_mask)
+                                    supervised_mask=supervised_mask,
+                                    unsupervised_mask=unsupervised_mask)
             iv_df = scan.iv_df
             bin_specs = scan.bin_specs
             miss_df = scan.miss_df
@@ -403,7 +443,8 @@ def run_stage1(cfg):
                     features, path, always=[label_col],
                     spec_map=spec_map, get_spec_fn=get_spec,
                     chunk_size=chunk_size, threshold=corr_threshold,
-                    min_overlap_frac=min_overlap)
+                    min_overlap_frac=min_overlap,
+                    row_mask=unsupervised_mask)
             if edges.empty:
                 logger.info("No feature pairs with |r| >= %.2f — correlation_edges.csv will "
                             "be empty (this is expected when no features are highly "
@@ -476,11 +517,6 @@ def run_stage1(cfg):
         sem_summary = build_semantic_groups_summary(summary, missing_by_group, cfg)
         sem_summary.to_csv(rdir / "semantic_groups.csv", index=False)
 
-        cand_df = discover_derivation_candidates(summary, cfg)
-        cand_df.to_csv(rdir / "family_derivation_candidates.csv", index=False)
-        logger.info("Derivation candidates: %d multi-window families flagged → %s",
-                    len(cand_df), rdir / "family_derivation_candidates.csv")
-
         # Optional XLSX — only if openpyxl happens to be available. A missing
         # package is an expected skip; any other failure (disk full,
         # permissions) is a real error and must be visible as such.
@@ -502,7 +538,6 @@ def run_stage1(cfg):
                     edges_out.to_excel(w, sheet_name="Correlation_Edges", index=False)
                     fam_summary.to_excel(w, sheet_name="Families", index=False)
                     sem_summary.to_excel(w, sheet_name="SemanticGroups", index=False)
-                    cand_df.to_excel(w, sheet_name="DerivationCandidates", index=False)
                 logger.info("Wrote optional XLSX: %s", xlsx_path)
             except Exception:
                 logger.warning("XLSX generation failed (CSV + HTML reports "

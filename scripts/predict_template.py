@@ -72,10 +72,13 @@ def _apply_missing_rules(df, spec_map, fitted):
         if spec.get("training_treat_zero_as_missing", False):
             arr = np.where(arr == 0.0, np.nan, arr)
 
-        # 5. fill
+        # 5. fill — only per fitted training stats. A feature without fitted
+        # stats keeps NaN, matching wdm.preprocess.missing
+        # .apply_missing_for_training exactly (the exporter guarantees every
+        # bundled feature has fitted stats, so this branch is defensive).
         if fs is None:
-            strategy = spec.get("fill_strategy", "constant")
-            fill = float(spec.get("fill_constant", -999.0))
+            strategy = "keep_nan"
+            fill = None
         else:
             strategy = fs.get("fill_strategy", "constant")
             fill = fs.get("fill_value")

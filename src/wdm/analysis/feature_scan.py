@@ -60,7 +60,7 @@ def block_cache_path(cache_dir, block_index):
 
 def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
                      spec_map, get_spec_fn, cfg, cache_dir=None,
-                     supervised_mask=None):
+                     supervised_mask=None, unsupervised_mask=None):
     """One pass over iter_column_chunks → ScanResult.
 
     cache_dir, when given, must be an existing (preferably empty, run-private)
@@ -69,8 +69,14 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
     supervised_mask: optional boolean row mask. When given, the label-driven
     statistics (IV/WOE, bin edges, Lift@K, Gini) are fit on the masked rows
     only — pass the train-split mask so valid/OOT labels never influence
-    feature selection. Label-free statistics (missing, PSI, correlation
-    pass-1) always use all rows.
+    feature selection.
+
+    unsupervised_mask: optional boolean row mask for the label-free selection
+    statistics (missing rate, correlation Pass-1 stats AND the cached .npy
+    blocks Pass-2 reads — the two must see the same rows). Pass the
+    train-split mask so valid/OOT feature distributions never influence the
+    missing-rate gate or which cluster member survives de-duplication. PSI
+    keeps its own mask_expected/mask_actual partition.
     """
     from wdm.io.chunked_reader import iter_column_chunks
     from wdm.preprocess.missing import to_nan_array
@@ -88,6 +94,13 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
         sup = np.asarray(supervised_mask, dtype=bool)
         if sup.shape[0] != n_expected_rows:
             raise ValueError("supervised_mask length != y length")
+    unsup = None
+    if unsupervised_mask is not None:
+        unsup = np.asarray(unsupervised_mask, dtype=bool)
+        if unsup.shape[0] != n_expected_rows:
+            raise ValueError("unsupervised_mask length != y length")
+        if unsup.all():
+            unsup = None  # full mask — take the cheaper unmasked path
 
     # Same y views as the legacy per-signal functions (optionally restricted
     # to the supervised rows).
@@ -123,10 +136,13 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
     for chunk_i, (df_chunk, block) in enumerate(
             track(chunk_iter, total=n_chunks, label="single-pass scan chunks")):
         n_total = len(df_chunk)
+        # Rows entering the label-free selection stats (missing, correlation)
+        # and the cached blocks — Pass-2 must see exactly these rows.
+        n_stat = n_total if unsup is None else int(unsup.sum())
         if n_rows is None:
-            n_rows = n_total
+            n_rows = n_stat
             if cache_dir is not None:
-                est_gb = n_rows * len(features) * 8.0 / 1e9
+                est_gb = n_stat * len(features) * 8.0 / 1e9
                 logger.info("scan cache enabled: ~%.2f GB of .npy blocks in %s",
                             est_gb, cache_dir)
         if n_total != n_expected_rows:
@@ -137,12 +153,12 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
         if n_total != m_e.shape[0]:
             raise ValueError("chunk rows != mask length")
 
-        M = np.empty((n_total, len(block)), dtype=np.float64)
+        M = np.empty((n_stat, len(block)), dtype=np.float64)
         for j, feat in enumerate(block):
             spec = get_spec_fn(spec_map, feat)
             raw = df_chunk[feat]
             arr, mask = to_nan_array(raw, spec, analysis=True)
-            M[:, j] = arr
+            M[:, j] = arr if unsup is None else arr[unsup]
 
             if feat in seen:
                 continue
@@ -151,8 +167,13 @@ def run_feature_scan(path, features, y_series, mask_expected, mask_actual,
             iv_row, bs = iv_row_from_array(arr_sup, y_iv, feat, n_bins_cfg, strategy)
             bin_specs[feat] = bs
             iv_rows.append(iv_row)
-            miss_rows.append(missing_row_from_array(feat, str(raw.dtype),
-                                                    arr, mask, n_total))
+            if unsup is None:
+                miss_rows.append(missing_row_from_array(feat, str(raw.dtype),
+                                                        arr, mask, n_total))
+            else:
+                miss_rows.append(missing_row_from_array(feat, str(raw.dtype),
+                                                        arr[unsup], mask[unsup],
+                                                        n_stat))
             lift_rows.append(lift_row_from_array(arr_sup, y_lift, feat, total_pos,
                                                  total_n, top_k_pct, n_bins_cfg))
             psi_rows.append(psi_row_from_array(arr, m_e, m_a, feat, n_bins_cfg,

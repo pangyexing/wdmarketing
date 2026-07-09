@@ -165,10 +165,13 @@ def _raw_validation_samples(cfg, data, booster, n_samples, calib_table=None):
     full = pd.concat(frames, axis=1)[data.feature_list].values.astype(np.float32)
 
     dmat = xgb.DMatrix(full)
+    # API-compat fallback only (older xgboost without iteration_range /
+    # boosters without best_iteration). A genuine prediction failure must
+    # abort the export — validation_samples.csv is the deploy contract.
     try:
         best_iter = booster.best_iteration + 1
         scores = booster.predict(dmat, iteration_range=(0, best_iter))
-    except Exception:
+    except (AttributeError, TypeError):
         scores = booster.predict(dmat, ntree_limit=booster.best_ntree_limit)
 
     out = sample_raw.copy()
@@ -246,7 +249,9 @@ def _probing_fingerprint(cfg):
                     "csv_path", "csv_size_bytes", "csv_mtime",
                     "n_rows", "n_features", "nnz", "density")
             }
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            logger.warning("probing cache manifest unreadable (%s): %s",
+                           cache_manifest, e)
             out["cache_error"] = str(e)
 
     probing_meta = report_dir(cfg) / "probing_meta.json"
@@ -279,7 +284,9 @@ def _probing_fingerprint(cfg):
                         "Probing cache drift detected between Stage 1 and "
                         "Stage 2 on fields: %s. Stage 1's feature ranking may "
                         "not reflect the current CSV.", diffs)
-        except Exception as e:
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.warning("stage1 probing_meta unreadable (%s): %s",
+                           probing_meta, e)
             out["stage1_error"] = str(e)
 
     return out
@@ -297,9 +304,10 @@ def _fit_calibration(cfg, data, booster, scores=None):
 
     def _predict(X):
         dmat = xgb.DMatrix(X)
+        # API-compat fallback only; real prediction errors must propagate.
         try:
             return booster.predict(dmat, iteration_range=(0, booster.best_iteration + 1))
-        except Exception:
+        except (AttributeError, TypeError):
             return booster.predict(dmat)
 
     if getattr(data, "X_calib", None) is not None:
@@ -337,8 +345,8 @@ def _ranking_method_used(run_dir):
         head = pd.read_csv(p, nrows=1)
         if "ranking_method" in head.columns and len(head):
             return str(head["ranking_method"].iloc[0])
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        logger.warning("exploratory_importance.csv unreadable: %s", p)
     return None
 
 
@@ -380,7 +388,17 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
     # 2. feature list
     _write_feature_list(run_dir / "feature_list.txt", data.feature_list)
 
-    # 3. missing_spec.json
+    # 3. missing_spec.json — every base feature MUST carry fitted stats:
+    # predict.py keeps NaN for features without them (mirroring
+    # apply_missing_for_training), so a gap here would mean deploy-time
+    # scores silently diverge from training. Fail the export instead.
+    missing_stats = [f for f in data.base_feature_list
+                     if f not in data.fitted]
+    if missing_stats:
+        raise ValueError(
+            "export aborted: {0} bundled feature(s) have no fitted missing "
+            "stats (predict.py would keep NaN where training filled): "
+            "{1}".format(len(missing_stats), ", ".join(missing_stats[:10])))
     dump_missing_spec(run_dir / "missing_spec.json", data.spec_map, data.fitted)
 
     # 3b. calibration.json (isotonic on valid; optional)

@@ -7,7 +7,6 @@
   "files": [
     "correlation_edges.csv",
     "families.csv",
-    "family_derivation_candidates.csv",
     "iv_woe.csv",
     "lift.csv",
     "missing.csv",

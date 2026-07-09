@@ -41,15 +41,6 @@ feature_groups:
   semantic_groups: []
   # (C) Plain numerical correlation is handled by analysis/correlation.py union-find.
 
-# Disabled placeholder — a future PR will implement Stage-2 materialization
-# of derived features (delta / ratio / incremental / velocity) and predict.py
-# replay. Stage-1 already reads this only to mark families as `already_configured`
-# in family_derivation_candidates.csv; nothing else reads it yet.
-feature_derivations:
-  enabled: false
-  default_keep_original: both         # both | replace | drop_original
-  families: []                        # see src/wdm/analysis/family.py docstring for schema
-
 missing:
   global:
     sentinels: [0]
@@ -76,19 +67,30 @@ analysis:
   psi_mode: soft
   psi_penalty_weight: 0.25       # weight on z(psi) in rank_score (was effectively 1.0)
   # PSI expected/actual partition:
-  #   halves        : earlier vs later half by median day (generic drift check)
+  #   train_halves  : earlier vs later half WITHIN the train split (default) —
+  #                   drift can feed rank_score without valid/OOT feature
+  #                   rows influencing selection.
+  #   halves        : earlier vs later half of the whole window (legacy;
+  #                   valid/OOT rows enter the selection PSI).
   #   train_vs_rest : train split vs valid+oot per training.split — measures
   #                   the drift the model actually faces at deployment.
-  #                   Recommended for time-split products.
+  #                   Explicit opt-in: valid/OOT feature distributions then
+  #                   move rank_score (deployment-facing, but not train-only).
   # Without a time column, PSI falls back to random halves and psi_mode is
   # forced to 'off' for the run (noise must not move rank_score).
-  psi_partition: halves
+  psi_partition: train_halves
   # Which rows fit the supervised Stage-1 stats (IV/WOE bins, Lift@K, Gini):
   #   train_only (default) : the training.split train rows only — valid/OOT
   #                          labels never influence feature selection.
   #   full                 : legacy behavior (all rows; leaks OOT labels into
   #                          selection — keep only for reproducing old runs).
   supervised_stats_split: train_only
+  # Which rows feed the label-free selection stats (missing rate → hard
+  # filter; correlation → which cluster member survives de-duplication):
+  #   train_only (default) : train rows only — valid/OOT feature
+  #                          distributions never influence selection.
+  #   full                 : legacy behavior (all rows).
+  unsupervised_stats_split: train_only
   iv_min: 0.02
   corr_cutoff: 0.95
   n_bins: 10
@@ -251,7 +253,11 @@ training:
   # never on the set that drove model selection. 0 restores the legacy
   # behavior (calibration fit on the full early-stopping valid set).
   calibration_split_fraction: 0.5
+  # Metrics reported per round on train+valid. NOTE: xgboost early-stops on
+  # the LAST eval_metric entry; train_final reorders the list so
+  # early_stop_metric is last, making best_iteration track it explicitly.
   eval_metrics: ["aucpr", "auc"]
+  early_stop_metric: aucpr
   # Hyperopt selection metric: aucpr (full-curve, legacy) or precision_at_k
   # (custom feval at training.top_k_pct — matches the top-K deployment goal).
   tuner_objective: aucpr

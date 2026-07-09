@@ -181,9 +181,11 @@ Stage-1 统计筛选（PSI/IV/Lift/相关性 → `v1_auto.txt`）之外，共有
 
 ### 方法论口径（防泄漏与评估诚实性）
 
-- **Stage-1 监督统计 train-only**：IV/WOE 分箱、Lift@K、Gini 只在 `training.split` 的 train 段上拟合（`analysis.supervised_stats_split: train_only`，默认），valid/OOT 标签不参与特征入选；缺失率/PSI/相关性等无标签统计仍用全量。设 `full` 可复现旧口径。
+- **Stage-1 监督统计 train-only**：IV/WOE 分箱、Lift@K、Gini 只在 `training.split` 的 train 段上拟合（`analysis.supervised_stats_split: train_only`，默认），valid/OOT 标签不参与特征入选。设 `full` 可复现旧口径。
+- **Stage-1 无监督统计同样 train-only**：缺失率（喂硬过滤）与相关性（决定簇内去重赢家）默认也只在 train 段上计算（`analysis.unsupervised_stats_split: train_only`），valid/OOT 的特征分布不影响特征入选；设 `full` 恢复全量口径。
+- **Stage-1 切分与 Stage-2 完全对齐**：Stage-1 的 train/valid/OOT 掩码与 `build_dataset` 共用同一实现（`wdm/utils/split_masks.py`），`data.exclude_rows` 与 `split.embargo_days` 在两个阶段一致生效——Stage-1 拟合统计的行集合就是 Stage-2 训练的行集合。
 - **时间切分按日对齐**：`split_by_yyyymmdd` 切点吸附到自然日边界（同一天绝不横跨两个切分），与 CV fold 的保证一致；`training.split.embargo_days` 可在切点后留出隔离窗（前瞻窗口标签防边界泄漏）。
-- **PSI 分区**：`analysis.psi_partition: train_vs_rest` 直接度量 train → valid+OOT 的漂移（时间切分产品推荐）；默认 `halves` 为通用前后对半。无时间列时 PSI 自动降为仅报告（不进 rank_score）。
+- **PSI 分区**：默认 `train_halves`（train 段内前后对半）——漂移信号可进 rank_score 而不让 valid/OOT 特征分布影响入选；`train_vs_rest` 直接度量 train → valid+OOT 的部署漂移（显式配置才启用，此时 valid/OOT 分布会随 psi_mode 进入选择，属自担的口径取舍）；`halves` 为旧版全窗口对半。无时间列时 PSI 自动降为仅报告（不进 rank_score）。
 - **校准独立留出**：valid 按时间序二分（`training.calibration_split_fraction`，默认 0.5）——前半供早停/剪枝，后半 `valid_calib` 专供 isotonic 校准拟合，校准曲线不再拟合在早停集上；`calibration.json` 与 `run_manifest.json` 记录 `fit_split`。评估表中 valid 标注为 model-selection set，`valid_calib` 单独成行。
 - **筛选模型与部署模型同不平衡口径**：probing / stage2 探索 ranker / null importance 均默认 `scale_pos_weight = neg/pos`，与最终模型的调参口径一致（xgb_params 显式配置可覆盖）。
 - **调参 CV 匹配部署切分**：时间切分产品配 `cv_strategy: time_forward`（xc/home_credit/hzz_day 均已配置）；配置加载时对 time split + 乱序 CV 的组合给出告警。

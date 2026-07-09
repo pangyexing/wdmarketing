@@ -44,6 +44,20 @@ def test_train_final_smoke():
     assert set(evals_result["valid"]) == {"aucpr", "auc"}
 
 
+def test_train_final_early_stops_on_aucpr():
+    """eval_metrics lists auc last, but best_iteration must track aucpr:
+    train_final moves early_stop_metric to the end of eval_metric (xgboost
+    early-stops on the last entry)."""
+    X, y = _tiny_data()
+    best_params = {"n_estimators": 60, "max_depth": 2, "eta": 0.3}
+    booster, evals_result = train_final(
+        best_params, X[:300], y[:300], X[300:], y[300:], _cfg())
+    assert booster.best_score == pytest.approx(
+        max(evals_result["valid"]["aucpr"]), abs=1e-9)
+    assert booster.best_score == pytest.approx(
+        evals_result["valid"]["aucpr"][booster.best_iteration], abs=1e-9)
+
+
 def test_train_final_weighted_loss_changes_model():
     X, y = _tiny_data()
     best_params = {"n_estimators": 20, "max_depth": 2, "eta": 0.3}

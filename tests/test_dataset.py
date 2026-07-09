@@ -234,10 +234,15 @@ def test_all_na_oot_rows_do_not_raise(tmp_path):
 
 # --- calibration holdout carve ------------------------------------------------
 
-def _carve_cfg(tmp_path, versions_dir, csv_path, frac=0.5, calibration_enabled=True):
+def _carve_cfg(tmp_path, versions_dir, csv_path, frac=0.5, calibration_enabled=True,
+               min_valid_rows=1, min_valid_pos=1):
     cfg = _make_cfg(tmp_path, versions_dir, csv_path, ratios=(0.5, 0.3, 0.2))
     cfg["training"]["calibration_split_fraction"] = frac
-    cfg["export"] = {"calibration": {"enabled": calibration_enabled}}
+    # Tiny fixtures: relax the usability precheck (defaults 200/10) — these
+    # tests exercise the carve mechanics, not the thresholds.
+    cfg["export"] = {"calibration": {"enabled": calibration_enabled,
+                                     "min_valid_rows": min_valid_rows,
+                                     "min_valid_pos": min_valid_pos}}
     return cfg
 
 
@@ -285,3 +290,18 @@ def test_no_carve_when_fraction_zero(tmp_path):
     vd = _write_selected_features(tmp_path, ["f1", "f2"])
     data = build_dataset(_carve_cfg(tmp_path, vd, csv, frac=0), version="v1")
     assert data.X_calib is None
+
+
+def test_no_carve_when_holdout_below_fit_thresholds(tmp_path):
+    """If the holdout could never satisfy fit_isotonic_table's minimums, the
+    carve is skipped so early stopping keeps the full valid set."""
+    df = _carve_frame()
+    csv = _write_csv(tmp_path, df)
+    vd = _write_selected_features(tmp_path, ["f1", "f2"])
+    data = build_dataset(
+        _carve_cfg(tmp_path, vd, csv, min_valid_rows=200, min_valid_pos=10),
+        version="v1")
+    assert data.X_calib is None
+    assert int(data.calib_mask.sum()) == 0
+    # valid keeps every row the split assigned to it.
+    assert int(data.valid_mask.sum()) == len(data.y_valid)

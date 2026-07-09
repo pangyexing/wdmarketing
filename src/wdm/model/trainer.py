@@ -32,7 +32,17 @@ def train_final(best_params, X_tr, y_tr, X_va, y_va, cfg, w_tr=None, w_va=None):
     by default so early stopping selects rounds on the per-person valid metric
     (pass w_va explicitly to opt into weighted early stopping)."""
     base = dict(cfg["training"]["xgb_base_params"])
-    base["eval_metric"] = list(cfg["training"]["eval_metrics"])
+    # xgboost early-stops on the LAST entry of eval_metric. Reorder so the
+    # configured early-stop target sits last; otherwise best_iteration would
+    # silently track whatever metric happens to close the list (e.g. ROC-AUC
+    # while the deployment goal is PR-AUC).
+    metrics = list(cfg["training"]["eval_metrics"])
+    es_metric = cfg["training"].get("early_stop_metric", "aucpr")
+    metrics = [m for m in metrics if m != es_metric] + [es_metric]
+    base["eval_metric"] = metrics
+    # Explicit seed (training.random_seed) — reproducible final fits under
+    # colsample/subsample sampling instead of xgboost's implicit default.
+    base.setdefault("seed", int(cfg["training"].get("random_seed", 42)))
 
     params = dict(base)
     resolved = dict(best_params)
@@ -45,8 +55,8 @@ def train_final(best_params, X_tr, y_tr, X_va, y_va, cfg, w_tr=None, w_va=None):
     dtrain = xgb.DMatrix(X_tr, label=y_tr, weight=w_tr)
     dvalid = xgb.DMatrix(X_va, label=y_va, weight=w_va)
 
-    logger.info("final train: up to %d rounds, early stopping after 50 stale rounds",
-                n_rounds)
+    logger.info("final train: up to %d rounds, early stopping on valid %s "
+                "after 50 stale rounds", n_rounds, es_metric)
     evals_result = {}
     booster = xgb.train(
         params=params,

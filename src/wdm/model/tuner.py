@@ -106,6 +106,9 @@ def run_hyperopt(X_train, y_train, cfg, trials_path=None, max_evals=None,
     base["eval_metric"] = eval_metrics
     # Silence xgb CV log flood
     base.setdefault("verbosity", 0)
+    # Explicit seed: don't rely on xgboost's implicit default (0) — CV trials
+    # must be reproducible under colsample/subsample sampling.
+    base.setdefault("seed", seed)
 
     objective_name = cfg["training"].get("tuner_objective", "aucpr")
     cv_strategy = cfg["training"].get("cv_strategy", "stratified")

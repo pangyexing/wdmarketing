@@ -26,17 +26,6 @@ Pattern configuration (feature_groups):
   a feature name wins. Matched `window` tokens are canonicalized via
   `alias` > `alias_rule` > raw, so downstream code only sees canonical
   keys from `window_order` (e.g. "7d", "30d", "1mon", "1y").
-
-Schema placeholder for a future PR (NOT read here):
-  feature_derivations:
-    enabled: false
-    default_keep_original: both   # both | replace | drop_original
-    families:
-      - family_base: <name>
-        ops:
-          - op: delta | ratio | incremental | velocity
-            ...
-        keep_original: both | replace | drop_original
 """
 import logging
 import re
@@ -481,45 +470,12 @@ def _family_iv_stats(block: pd.DataFrame) -> Dict[str, Any]:
     return out
 
 
-def _suggest_derivation_ops(stats: Dict[str, Any], n_windows: int) -> Tuple[List[str], str]:
-    """Return (ops_list, rationale) per the heuristics documented in the plan."""
-    ops: List[str] = []
-    reasons: List[str] = []
-    iv_short = stats.get("iv_shortest")
-    iv_best = stats.get("iv_best")
-    ratio = stats.get("iv_ratio_long_over_short")
-    miss_short = stats.get("missing_rate_shortest")
-
-    if n_windows >= 2 and pd.notna(ratio) and ratio > 1.5:
-        ops.extend(["delta", "ratio"])
-        reasons.append("long_{0:.2f}x_iv_of_short".format(ratio))
-    if n_windows >= 3:
-        ops.append("incremental")
-        reasons.append("has_3plus_windows")
-    if (pd.notna(iv_short) and pd.notna(iv_best) and iv_best > 0
-            and iv_short >= 0.8 * iv_best
-            and (pd.isna(miss_short) or miss_short < 0.9)):
-        ops.append("keep_short_only")
-        reasons.append("short_iv_within_20pct_of_best")
-    # Dedup while preserving order
-    seen = set()
-    ops_unique = [o for o in ops if not (o in seen or seen.add(o))]
-    return ops_unique, ";".join(reasons)
-
-
-def _configured_derivation_bases(cfg: Dict[str, Any]) -> set:
-    fd = (cfg.get("feature_derivations") or {})
-    if not fd.get("enabled"):
-        return set()
-    families = fd.get("families") or []
-    return {str(g.get("family_base")) for g in families if g.get("family_base")}
-
-
 def build_families_summary(feature_report, cfg=None):
     """Aggregate view grouped by family_base, for the Families sheet/CSV.
 
-    When `cfg` is provided, also includes three derivation-hint columns:
-    `iv_ratio_long_over_short`, `iv_delta_best_vs_short`, `derivation_suggested`.
+    When `cfg` is provided, also includes two window-bias diagnostics
+    consumed by notebooks/06_window_family_analysis:
+    `iv_ratio_long_over_short`, `iv_delta_best_vs_short`.
     """
     df = feature_report.copy()
     rows = []
@@ -528,9 +484,6 @@ def build_families_summary(feature_report, cfg=None):
             continue  # skip singletons
         windows = [w for w in block["window"].tolist() if w is not None]
         stats = _family_iv_stats(block) if cfg is not None else {}
-        n_windows = int(block["window"].notna().sum()) if "window" in block.columns else 0
-        suggested_ops, _ = (_suggest_derivation_ops(stats, n_windows)
-                            if cfg is not None else ([], ""))
         row = {
             "family_base": base,
             "window_list": ",".join(windows),
@@ -545,70 +498,16 @@ def build_families_summary(feature_report, cfg=None):
             row.update({
                 "iv_ratio_long_over_short": stats.get("iv_ratio_long_over_short", np.nan),
                 "iv_delta_best_vs_short": stats.get("iv_delta_best_vs_short", np.nan),
-                "derivation_suggested": bool(suggested_ops),
             })
         rows.append(row)
     columns = ["family_base", "window_list", "iv_best", "iv_median", "psi_max",
                "kept_count", "kept_features"]
     if cfg is not None:
-        columns += ["iv_ratio_long_over_short", "iv_delta_best_vs_short",
-                    "derivation_suggested"]
+        columns += ["iv_ratio_long_over_short", "iv_delta_best_vs_short"]
     out = pd.DataFrame(rows, columns=columns)
     if out.empty:
         return out
     return out.sort_values("iv_best", ascending=False).reset_index(drop=True)
-
-
-def discover_derivation_candidates(feature_report, cfg):
-    """Emit a per-family advice table naming which families have 2+ windows
-    and which derivation ops (delta/ratio/incremental/keep_short_only) they
-    look like candidates for. Returns a DataFrame with a stable column schema
-    (empty rows when no multi-window families exist).
-
-    This function does NOT execute any derivation — it only suggests.
-    """
-    columns = [
-        "family_base", "n_windows", "window_list",
-        "iv_best_window", "iv_best_value",
-        "iv_shortest_window", "iv_shortest_value",
-        "iv_ratio_long_over_short", "iv_delta_best_vs_short",
-        "missing_rate_shortest", "suggested_ops", "rationale", "already_configured",
-    ]
-    if feature_report is None or feature_report.empty:
-        return pd.DataFrame(columns=columns)
-
-    configured = _configured_derivation_bases(cfg)
-    rows = []
-    for base, block in feature_report.groupby("family_base"):
-        # Count only rows that matched a pattern (window non-null)
-        windowed = block["window"].notna() if "window" in block.columns else pd.Series([False] * len(block))
-        n_windows = int(windowed.sum())
-        if n_windows < 2:
-            continue
-        stats = _family_iv_stats(block)
-        ops, rationale = _suggest_derivation_ops(stats, n_windows)
-        windows = [w for w in block.loc[windowed, "window"].tolist()]
-        rows.append({
-            "family_base": base,
-            "n_windows": n_windows,
-            "window_list": ",".join(windows),
-            "iv_best_window": stats.get("iv_best_window"),
-            "iv_best_value": stats.get("iv_best"),
-            "iv_shortest_window": stats.get("iv_shortest_window"),
-            "iv_shortest_value": stats.get("iv_shortest"),
-            "iv_ratio_long_over_short": stats.get("iv_ratio_long_over_short"),
-            "iv_delta_best_vs_short": stats.get("iv_delta_best_vs_short"),
-            "missing_rate_shortest": stats.get("missing_rate_shortest"),
-            "suggested_ops": ",".join(ops),
-            "rationale": rationale,
-            "already_configured": str(base) in configured,
-        })
-    out = pd.DataFrame(rows, columns=columns)
-    if out.empty:
-        return out
-    # Sort so highest-IV candidates surface first
-    return out.sort_values(["iv_best_value", "n_windows"],
-                           ascending=[False, False]).reset_index(drop=True)
 
 
 def build_semantic_groups_summary(feature_report, missing_by_group, cfg):

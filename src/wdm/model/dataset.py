@@ -17,7 +17,8 @@ from wdm.preprocess.missing import (
     apply_missing_for_training, build_missing_spec, fit_missing,
     get_spec, to_nan_array,
 )
-from wdm.utils.time_utils import split_by_yyyymmdd, split_stratified
+from wdm.utils.labels import validate_binary_label
+from wdm.utils.split_masks import compute_split_masks
 
 logger = logging.getLogger(__name__)
 
@@ -114,38 +115,6 @@ def build_sample_weights(series, sw_cfg):
     return w
 
 
-def _exclude_mask(df, exclude_rows):
-    """Boolean mask of rows KEPT after applying data.exclude_rows rules."""
-    keep = np.ones(len(df), dtype=bool)
-    for rule in exclude_rows:
-        col = rule["column"]
-        vals = [float(v) for v in rule["values"]]
-        num = pd.to_numeric(df[col], errors="coerce")
-        drop = num.isin(vals).values
-        keep &= ~drop
-        logger.info("exclude_rows: %s in %s drops %d rows", col, rule["values"],
-                    int(drop.sum()))
-    return keep
-
-
-def _split_masks(df, cfg):
-    split_cfg = cfg["training"]["split"]
-    strategy = split_cfg["strategy"]
-    ratios = list(split_cfg["ratios"])
-    seed = int(cfg["training"]["random_seed"])
-    if strategy == "stratified":
-        if cfg["data"].get("time_column"):
-            logger.warning("time_column is configured but split.strategy='stratified' — using stratified anyway")
-        return split_stratified(df[cfg["data"]["label_column"]].values, ratios, seed=seed)
-    if strategy == "time":
-        time_col = cfg["data"].get("time_column")
-        if not time_col:
-            raise ValueError("split.strategy='time' requires data.time_column")
-        return split_by_yyyymmdd(df[time_col], ratios,
-                                 embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
-    raise ValueError("Unknown split strategy: {0}".format(strategy))
-
-
 def build_dataset(cfg, version=None):
     """Build StageTwoData for the given selected-features version."""
     feats, feats_path = _load_selected_features(cfg, version)
@@ -162,22 +131,13 @@ def build_dataset(cfg, version=None):
     df = pd.read_csv(path, usecols=needed)
     n_raw = len(df)
 
+    # Shared with Stage-1 (wdm.pipeline.stage1) so both stages agree on which
+    # rows are "train": exclude_rows are False in all three masks (exporter
+    # indexes the raw CSV with them) and time splits purge embargo_days.
+    m_tr, m_va, m_oot, included = compute_split_masks(df, cfg)
+    validate_binary_label(df.loc[included, label_col], label_col)
     if exclude_rows:
-        included = _exclude_mask(df, exclude_rows)
-        # Split on the surviving rows only, then scatter the masks back to
-        # full-CSV length: exporter indexes the raw CSV with these masks, so
-        # excluded rows must be False in all three.
-        sub_tr, sub_va, sub_oot = _split_masks(df[included].reset_index(drop=True), cfg)
-        inc_idx = np.where(included)[0]
-        m_tr = np.zeros(n_raw, dtype=bool)
-        m_va = np.zeros(n_raw, dtype=bool)
-        m_oot = np.zeros(n_raw, dtype=bool)
-        m_tr[inc_idx[np.asarray(sub_tr)]] = True
-        m_va[inc_idx[np.asarray(sub_va)]] = True
-        m_oot[inc_idx[np.asarray(sub_oot)]] = True
         logger.info("exclude_rows kept %d / %d rows", int(included.sum()), n_raw)
-    else:
-        m_tr, m_va, m_oot = _split_masks(df, cfg)
     logger.info("Split sizes: train=%d valid=%d oot=%d",
                 int(m_tr.sum()), int(m_va.sum()), int(m_oot.sum()))
 
@@ -344,6 +304,12 @@ def build_dataset(cfg, version=None):
     if calib_frac > 0 and calib_enabled:
         n_va_rows = int(y_va.shape[0])
         n_cal = int(round(n_va_rows * calib_frac))
+        # Precheck with the same thresholds fit_isotonic_table will apply:
+        # if the holdout could never fit a curve, don't pay for it — carving
+        # would shrink the early-stopping set AND leave the model uncalibrated.
+        calib_cfg = ((cfg.get("export") or {}).get("calibration") or {})
+        cal_min_rows = int(calib_cfg.get("min_valid_rows", 200))
+        cal_min_pos = int(calib_cfg.get("min_valid_pos", 10))
         if n_cal >= 1 and n_va_rows - n_cal >= 1:
             if dt_va is not None:
                 order = np.argsort(np.where(np.isnan(dt_va), np.inf, dt_va),
@@ -353,22 +319,33 @@ def build_dataset(cfg, version=None):
                     int(cfg["training"]["random_seed"])).permutation(n_va_rows)
             cal_sel = np.zeros(n_va_rows, dtype=bool)
             cal_sel[order[n_va_rows - n_cal:]] = True
-            X_cal, y_cal = X_va[cal_sel], y_va[cal_sel]
-            dt_cal = dt_va[cal_sel] if dt_va is not None else None
-            w_cal = w_va[cal_sel] if w_va is not None else None
-            X_va, y_va = X_va[~cal_sel], y_va[~cal_sel]
-            dt_va = dt_va[~cal_sel] if dt_va is not None else None
-            w_va = w_va[~cal_sel] if w_va is not None else None
-            # Raw-length bookkeeping: valid rows (post all-NA drop) map 1:1,
-            # in order, onto valid_mask's True positions.
-            vpos = np.where(valid_mask)[0]
-            calib_mask[vpos[cal_sel]] = True
-            valid_mask[vpos[cal_sel]] = False
-            logger.info(
-                "Valid carved: early-stop/selection n=%d, calibration holdout "
-                "n=%d (calibration_split_fraction=%.2f, %s).",
-                int(y_va.shape[0]), n_cal, calib_frac,
-                "time-ordered tail" if dt_cal is not None else "random subset")
+            n_pos_cal = int(np.sum(y_va[cal_sel] == 1))
+            if n_cal < cal_min_rows or n_pos_cal < cal_min_pos \
+                    or n_pos_cal == n_cal:
+                logger.warning(
+                    "calibration holdout would be unusable (n=%d pos=%d vs "
+                    "export.calibration min_valid_rows=%d min_valid_pos=%d) "
+                    "— carve skipped; early stopping keeps the full valid "
+                    "set and calibration falls back to it.",
+                    n_cal, n_pos_cal, cal_min_rows, cal_min_pos)
+            else:
+                X_cal, y_cal = X_va[cal_sel], y_va[cal_sel]
+                dt_cal = dt_va[cal_sel] if dt_va is not None else None
+                w_cal = w_va[cal_sel] if w_va is not None else None
+                X_va, y_va = X_va[~cal_sel], y_va[~cal_sel]
+                dt_va = dt_va[~cal_sel] if dt_va is not None else None
+                w_va = w_va[~cal_sel] if w_va is not None else None
+                # Raw-length bookkeeping: valid rows (post all-NA drop) map
+                # 1:1, in order, onto valid_mask's True positions.
+                vpos = np.where(valid_mask)[0]
+                calib_mask[vpos[cal_sel]] = True
+                valid_mask[vpos[cal_sel]] = False
+                logger.info(
+                    "Valid carved: early-stop/selection n=%d, calibration "
+                    "holdout n=%d (calibration_split_fraction=%.2f, %s).",
+                    int(y_va.shape[0]), n_cal, calib_frac,
+                    "time-ordered tail" if dt_cal is not None
+                    else "random subset")
         else:
             logger.warning(
                 "calibration_split_fraction=%.2f would leave an empty half "

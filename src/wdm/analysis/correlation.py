@@ -105,7 +105,8 @@ def compute_correlation_edges(features,
                               get_spec_fn,
                               chunk_size=50,
                               threshold=0.95,
-                              min_overlap_frac=0.10):
+                              min_overlap_frac=0.10,
+                              row_mask=None):
     """Two-pass block-wise Pearson correlation.
 
     Returns a DataFrame of edges with columns:
@@ -113,6 +114,10 @@ def compute_correlation_edges(features,
     Only includes |r| >= threshold. `low_overlap` marks pairs where the
     pairwise-complete overlap fraction is below min_overlap_frac — the
     selector should ignore these.
+
+    row_mask: optional boolean mask; when given only those rows enter both
+    passes — the same semantics as the scan-cache path, where the cached
+    blocks are saved pre-masked (analysis.unsupervised_stats_split).
     """
     from wdm.io.chunked_reader import iter_column_chunks
     from wdm.preprocess.missing import to_nan_array
@@ -120,6 +125,10 @@ def compute_correlation_edges(features,
 
     features = list(features)
     n_chunks = (len(features) + chunk_size - 1) // chunk_size
+    if row_mask is not None:
+        row_mask = np.asarray(row_mask, dtype=bool)
+        if row_mask.all():
+            row_mask = None
 
     # ---- Pass 1: global means + sum_sq ----
     feat_idx = {f: i for i, f in enumerate(features)}
@@ -131,7 +140,7 @@ def compute_correlation_edges(features,
     for df_chunk, block in track(
             iter_column_chunks(path, features, always=always, chunk_size=chunk_size),
             total=n_chunks, label="correlation pass1 chunks"):
-        n_rows = len(df_chunk)
+        n_rows = len(df_chunk) if row_mask is None else int(row_mask.sum())
         if total_rows is None:
             total_rows = n_rows
         # Convert each column in block to NaN-aware
@@ -139,7 +148,7 @@ def compute_correlation_edges(features,
         for j, feat in enumerate(block):
             spec = get_spec_fn(spec_map, feat)
             arr, _ = to_nan_array(df_chunk[feat], spec, analysis=True)
-            cols[:, j] = arr
+            cols[:, j] = arr if row_mask is None else arr[row_mask]
         c, s, s2 = _column_stats(cols)
         for j, feat in enumerate(block):
             i = feat_idx[feat]
@@ -168,11 +177,12 @@ def compute_correlation_edges(features,
         logger.info("[corr pass 2 cov] block %d/%d loaded (%d features); pairing with %d remaining blocks",
                     bi + 1, n_chunks, len(blockA), n_chunks - bi)
         # Build nan-aware matrix for blockA
-        A = np.empty((len(dfA), len(blockA)), dtype=np.float64)
+        n_a = len(dfA) if row_mask is None else int(row_mask.sum())
+        A = np.empty((n_a, len(blockA)), dtype=np.float64)
         for j, feat in enumerate(blockA):
             spec = get_spec_fn(spec_map, feat)
             arr, _ = to_nan_array(dfA[feat], spec, analysis=True)
-            A[:, j] = arr
+            A[:, j] = arr if row_mask is None else arr[row_mask]
 
         for bj in range(bi, n_chunks):  # symmetric; include diagonal for within-block pairs
             blockB = blocks[bj]
@@ -185,11 +195,12 @@ def compute_correlation_edges(features,
                 always_set_b = list(set(always) | set(blockB))
                 dfB = pd.read_csv(path, usecols=always_set_b)
                 dfB = dfB[always_set_b]
-                B = np.empty((len(dfB), len(blockB)), dtype=np.float64)
+                n_b = len(dfB) if row_mask is None else int(row_mask.sum())
+                B = np.empty((n_b, len(blockB)), dtype=np.float64)
                 for j, feat in enumerate(blockB):
                     spec = get_spec_fn(spec_map, feat)
                     arr, _ = to_nan_array(dfB[feat], spec, analysis=True)
-                    B[:, j] = arr
+                    B[:, j] = arr if row_mask is None else arr[row_mask]
 
             cov, pairs = _pairwise_cov_block(A, B, muA, muB)
             denom = np.outer(stdA, stdB)

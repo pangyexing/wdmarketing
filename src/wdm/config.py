@@ -187,9 +187,15 @@ def _validate(cfg: Dict[str, Any]) -> None:
         raise ValueError("analysis.supervised_stats_split must be "
                          "'train_only' or 'full'")
 
-    psi_part = cfg["analysis"].get("psi_partition", "halves")
-    if str(psi_part).lower() not in ("halves", "train_vs_rest"):
-        raise ValueError("analysis.psi_partition must be 'halves' or 'train_vs_rest'")
+    unsup_split = cfg["analysis"].get("unsupervised_stats_split", "train_only")
+    if str(unsup_split).lower() not in ("train_only", "full"):
+        raise ValueError("analysis.unsupervised_stats_split must be "
+                         "'train_only' or 'full'")
+
+    psi_part = cfg["analysis"].get("psi_partition", "train_halves")
+    if str(psi_part).lower() not in ("train_halves", "halves", "train_vs_rest"):
+        raise ValueError("analysis.psi_partition must be 'train_halves', "
+                         "'halves' or 'train_vs_rest'")
 
     fill_strategy = cfg["missing"]["global"].get("fill_strategy")
     valid = {"constant", "median", "mean", "zero", "special", "keep_nan"}
