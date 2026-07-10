@@ -31,7 +31,7 @@ import pandas as pd
 from wdm.analysis.correlation import _column_stats
 from wdm.analysis.iv_woe import iv_row_from_array
 from wdm.analysis.lift import lift_row_from_array
-from wdm.analysis.missing import missing_row_from_array
+from wdm.analysis.missing_stats import missing_row_from_array
 from wdm.analysis.psi import flag_thresholds, psi_row_from_array
 
 logger = logging.getLogger(__name__)

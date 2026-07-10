@@ -83,6 +83,28 @@ def _validate(cfg: Dict[str, Any]) -> None:
     if missing:
         raise ValueError("Config missing required top-level keys: {0}".format(missing))
 
+    # Single source of truth: these defaults live ONLY in configs/global.yaml.
+    # Consumers index them directly (no .get fallbacks that could drift), so
+    # any config bypassing global.yaml must supply them explicitly.
+    for section, keys in (
+            ("training", ("tuner_objective", "eval_metrics",
+                          "early_stop_metric", "calibration_split_fraction",
+                          "random_seed", "split")),
+            ("analysis", ("psi_partition", "supervised_stats_split",
+                          "unsupervised_stats_split")),
+            ("export", ("model_format",)),
+    ):
+        absent = [k for k in keys if k not in (cfg.get(section) or {})]
+        if absent:
+            raise ValueError(
+                "{0} section missing required key(s) {1} — the defaults live "
+                "only in configs/global.yaml".format(section, absent))
+    for k in ("strategy", "ratios"):
+        if k not in (cfg["training"]["split"] or {}):
+            raise ValueError(
+                "training.split missing required key {0!r} — the default "
+                "lives only in configs/global.yaml".format(k))
+
     data = cfg["data"]
     if not data.get("train_path"):
         raise ValueError("data.train_path must be set")
@@ -100,7 +122,7 @@ def _validate(cfg: Dict[str, Any]) -> None:
                     "data.exclude_rows entries must be {{column: <str>, values: [..]}}; got {0}"
                     .format(rule))
 
-    tuner_objective = cfg["training"].get("tuner_objective", "aucpr")
+    tuner_objective = cfg["training"]["tuner_objective"]
     if tuner_objective not in ("aucpr", "precision_at_k"):
         raise ValueError("training.tuner_objective must be 'aucpr' or 'precision_at_k'")
 
@@ -144,7 +166,7 @@ def _validate(cfg: Dict[str, Any]) -> None:
         raise ValueError("training.stage2_pruning.shap_fallback {0!r} invalid; "
                          "expected a non-shap ranking method or 'raise'".format(fb))
 
-    csf = cfg["training"].get("calibration_split_fraction", 0.5)
+    csf = cfg["training"]["calibration_split_fraction"]
     if csf is not None and (not isinstance(csf, (int, float))
                             or isinstance(csf, bool)
                             or not (0 <= float(csf) < 1)):
@@ -182,17 +204,17 @@ def _validate(cfg: Dict[str, Any]) -> None:
                             or emb < 0):
         raise ValueError("training.split.embargo_days must be a non-negative integer")
 
-    sup_split = cfg["analysis"].get("supervised_stats_split", "train_only")
+    sup_split = cfg["analysis"]["supervised_stats_split"]
     if str(sup_split).lower() not in ("train_only", "full"):
         raise ValueError("analysis.supervised_stats_split must be "
                          "'train_only' or 'full'")
 
-    unsup_split = cfg["analysis"].get("unsupervised_stats_split", "train_only")
+    unsup_split = cfg["analysis"]["unsupervised_stats_split"]
     if str(unsup_split).lower() not in ("train_only", "full"):
         raise ValueError("analysis.unsupervised_stats_split must be "
                          "'train_only' or 'full'")
 
-    psi_part = cfg["analysis"].get("psi_partition", "train_halves")
+    psi_part = cfg["analysis"]["psi_partition"]
     if str(psi_part).lower() not in ("train_halves", "halves", "train_vs_rest"):
         raise ValueError("analysis.psi_partition must be 'train_halves', "
                          "'halves' or 'train_vs_rest'")
@@ -230,7 +252,7 @@ def _validate(cfg: Dict[str, Any]) -> None:
     if sc and not isinstance(sc.get("enabled", True), bool):
         raise ValueError("io.scan_cache.enabled must be a boolean")
 
-    fmts = cfg["export"].get("model_format", ["json"])
+    fmts = cfg["export"]["model_format"]
     if isinstance(fmts, str):
         fmts = [fmts]
     valid_fmts = {"json", "bin", "binary", "ubj"}
@@ -255,9 +277,9 @@ def _validate_feature_groups(cfg: Dict[str, Any]) -> None:
         raise ValueError("feature_groups must define either 'window_patterns' "
                          "(list) or 'window_pattern' (single regex)")
 
-    from wdm.analysis.family import _resolve_patterns  # lazy to avoid cycles
+    from wdm.utils.window_patterns import resolve_patterns
     try:
-        _resolve_patterns(cfg)
+        resolve_patterns(cfg)
     except (re.error, ValueError) as exc:
         raise ValueError("feature_groups pattern config invalid: {0}".format(exc))
 

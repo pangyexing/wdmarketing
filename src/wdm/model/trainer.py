@@ -37,12 +37,12 @@ def train_final(best_params, X_tr, y_tr, X_va, y_va, cfg, w_tr=None, w_va=None):
     # silently track whatever metric happens to close the list (e.g. ROC-AUC
     # while the deployment goal is PR-AUC).
     metrics = list(cfg["training"]["eval_metrics"])
-    es_metric = cfg["training"].get("early_stop_metric", "aucpr")
+    es_metric = cfg["training"]["early_stop_metric"]
     metrics = [m for m in metrics if m != es_metric] + [es_metric]
     base["eval_metric"] = metrics
     # Explicit seed (training.random_seed) — reproducible final fits under
     # colsample/subsample sampling instead of xgboost's implicit default.
-    base.setdefault("seed", int(cfg["training"].get("random_seed", 42)))
+    base.setdefault("seed", int(cfg["training"]["random_seed"]))
 
     params = dict(base)
     resolved = dict(best_params)

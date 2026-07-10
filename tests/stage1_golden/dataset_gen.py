@@ -156,6 +156,11 @@ def build_cfg(repo_root):
             "n_bins": 10,
             "binning": "equal_freq",
             "per_feature_plot_top_n": 50,
+            # required keys (defaults live only in configs/global.yaml);
+            # values match the Batch-1 defaults the snapshot was built under.
+            "psi_partition": "train_halves",
+            "supervised_stats_split": "train_only",
+            "unsupervised_stats_split": "train_only",
             "lift_keep_min": 1.2,
             "rank_weights": {
                 "iv": 1.0,
@@ -171,6 +176,9 @@ def build_cfg(repo_root):
             "top_k_pct": 0.10,
             "final_feature_count": 25,
             "random_seed": 42,
+            # explicit split (was previously the silent in-code default)
+            "split": {"strategy": "stratified",
+                      "ratios": [0.70, 0.15, 0.15], "embargo_days": 0},
         },
         "io": {
             "column_chunk_size": 7,

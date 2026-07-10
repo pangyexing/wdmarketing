@@ -48,6 +48,7 @@ import xgboost as xgb
 
 from wdm.metrics.pr_auc import pr_auc
 from wdm.model.dataset import StageTwoData
+from wdm.model.xgb_screen import apply_scale_pos_weight_default, gain_series
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +58,9 @@ logger = logging.getLogger(__name__)
 def _train_exploratory(X_tr, y_tr, X_va, y_va, prune_cfg, seed=0):
     params = dict(prune_cfg.get("xgb_params") or {})
     params["seed"] = int(seed)
-    # Align the imbalance regime with the deployed model (which tunes
-    # scale_pos_weight): an unweighted exploratory ranker under-ranks
-    # features whose signal concentrates in the rare positive class.
-    # Explicit xgb_params.scale_pos_weight still wins.
-    if "scale_pos_weight" not in params:
-        n_pos = float(np.sum(np.asarray(y_tr) == 1))
-        n_neg = float(np.asarray(y_tr).size - n_pos)
-        if n_pos > 0:
-            params["scale_pos_weight"] = n_neg / n_pos
+    # Shared imbalance default (scale_pos_weight = neg/pos) — same regime as
+    # probing, null_importance and the deployed model.
+    apply_scale_pos_weight_default(params, y_tr)
     n_rounds = int(prune_cfg.get("num_boost_round", 200))
     early_stop = int(prune_cfg.get("early_stopping_rounds", 30))
     dtrain = xgb.DMatrix(X_tr, label=y_tr)
@@ -89,11 +84,7 @@ def _predict_valid(booster, X):
 
 
 def _gain_series(booster, feature_list):
-    raw = booster.get_score(importance_type="gain")
-    rename = {"f{0}".format(i): feature_list[i] for i in range(len(feature_list))}
-    gain = {rename.get(k, k): v for k, v in raw.items()}
-    return pd.Series(
-        [float(gain.get(f, 0.0)) for f in feature_list], index=feature_list)
+    return gain_series(booster, feature_list)
 
 
 # --- ranking signals ---------------------------------------------------------

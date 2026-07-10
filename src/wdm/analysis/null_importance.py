@@ -42,21 +42,14 @@ _FIXED_PARAMS = {
 
 
 def _resolve_params(cfg, ni_cfg, y_train):
+    from wdm.model.xgb_screen import apply_scale_pos_weight_default
+
     params = dict(cfg["training"].get("xgb_base_params") or {})
     params.update(_FIXED_PARAMS)
-    pos = float((np.asarray(y_train) == 1).sum())
-    neg = float(np.asarray(y_train).size - pos)
-    if pos > 0:
-        params["scale_pos_weight"] = neg / pos
+    apply_scale_pos_weight_default(params, y_train)
     params.update(ni_cfg.get("xgb_params") or {})
     params.pop("eval_metric", None)
     return params
-
-
-def _gain_vector(booster, feature_list, importance_type):
-    score = booster.get_score(importance_type=importance_type)
-    return np.array([float(score.get(f, 0.0)) for f in feature_list],
-                    dtype=np.float64)
 
 
 def run_null_importance(cfg, base_version=None, out_version=None,
@@ -117,12 +110,14 @@ def run_null_importance(cfg, base_version=None, out_version=None,
 
     params = _resolve_params(cfg, ni_cfg, y)
 
+    from wdm.model.xgb_screen import gain_vector
+
     def _train_gain(labels, run_seed):
         p = dict(params)
         p["seed"] = int(run_seed)
         dtrain = xgb.DMatrix(X, label=labels, feature_names=feature_list)
         booster = xgb.train(params=p, dtrain=dtrain, num_boost_round=n_rounds)
-        return _gain_vector(booster, feature_list, imp_type)
+        return gain_vector(booster, feature_list, imp_type)
 
     actual_gains = np.vstack([
         _train_gain(y, seed + i)

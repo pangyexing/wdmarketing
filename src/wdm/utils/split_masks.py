@@ -56,10 +56,12 @@ def compute_split_masks(df, cfg):
     split.embargo_days after each cut day.
     """
     data_cfg = cfg["data"]
-    split_cfg = cfg["training"].get("split") or {}
-    strategy = split_cfg.get("strategy", "stratified")
-    ratios = list(split_cfg.get("ratios", [0.70, 0.15, 0.15]))
-    seed = int(cfg["training"].get("random_seed", 42))
+    # No fallback defaults here: training.split / random_seed defaults live
+    # only in configs/global.yaml (config._validate asserts presence).
+    split_cfg = cfg["training"]["split"]
+    strategy = split_cfg["strategy"]
+    ratios = list(split_cfg["ratios"])
+    seed = int(cfg["training"]["random_seed"])
     exclude_rows = data_cfg.get("exclude_rows") or []
     included = exclude_mask(df, exclude_rows)
     sub = df[included].reset_index(drop=True) if exclude_rows else df

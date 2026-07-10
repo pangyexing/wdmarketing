@@ -298,7 +298,7 @@ def build_dataset(cfg, version=None):
     # disables (legacy: calibration then fits on the full valid).
     X_cal = y_cal = dt_cal = w_cal = None
     calib_mask = np.zeros(len(valid_mask), dtype=bool)
-    calib_frac = float(cfg["training"].get("calibration_split_fraction", 0.5) or 0.0)
+    calib_frac = float(cfg["training"]["calibration_split_fraction"] or 0.0)
     calib_enabled = bool(((cfg.get("export") or {}).get("calibration") or {})
                          .get("enabled", False))
     if calib_frac > 0 and calib_enabled:

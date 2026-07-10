@@ -4,8 +4,7 @@ report artifacts (summary.csv, index.html, v1_auto.txt, ...).
 
 Scoring and filtering logic (rank_score, hard filters, cluster winners) lives
 in wdm.analysis.selector; this module owns the run order, the scan cache
-lifecycle, and artifact writing. wdm.analysis.selector re-exports run_stage1
-for backward compatibility.
+lifecycle, and artifact writing.
 """
 import datetime
 import hashlib
@@ -241,12 +240,6 @@ def report_hash(summary_csv_path):
     return h.hexdigest()[:12]
 
 
-# Backward-compat aliases: null_importance (and older callers) imported the
-# underscore names before these became cross-module API.
-_write_auto_features_txt = write_auto_features_txt
-_report_hash = report_hash
-
-
 def _make_scan_cache_dir(cfg, scan_cache_cfg):
     """Create a run-private cache dir for the single-pass scan's .npy blocks.
 
@@ -307,8 +300,8 @@ def run_stage1(cfg):
         # exclude_rows filtering and embargo purging match build_dataset
         # exactly, so every fitted Stage-1 statistic sees the same "train"
         # rows the final model trains on.
-        split_cfg = cfg["training"].get("split") or {}
-        seed = int(cfg["training"].get("random_seed", 42))
+        split_cfg = cfg["training"]["split"]
+        seed = int(cfg["training"]["random_seed"])
         m_tr, m_va, m_oot, included = compute_split_masks(meta_df, cfg)
         validate_binary_label(y[included], label_col)
 
@@ -316,14 +309,13 @@ def run_stage1(cfg):
         # train split only, so valid/OOT labels never influence which
         # features are selected. analysis.supervised_stats_split: full
         # restores the legacy full-data behavior.
-        sup_mode = str(cfg["analysis"].get("supervised_stats_split",
-                                           "train_only")).lower()
+        sup_mode = str(cfg["analysis"]["supervised_stats_split"]).lower()
         if sup_mode == "train_only":
             supervised_mask = m_tr
             logger.info("Supervised Stage-1 stats (IV/Lift/Gini + bin edges) "
                         "fit on the train split only: %d/%d rows (split=%s).",
                         int(m_tr.sum()), len(meta_df),
-                        split_cfg.get("strategy", "stratified"))
+                        split_cfg["strategy"])
         else:
             # "full" restores the legacy all-rows behavior for the labels,
             # but rows dropped by data.exclude_rows still never enter any
@@ -337,8 +329,7 @@ def run_stage1(cfg):
         # correlation → which cluster member survives de-duplication) follow
         # the same train-only discipline by default; `full` restores the
         # legacy all-rows behavior.
-        unsup_mode = str(cfg["analysis"].get("unsupervised_stats_split",
-                                             "train_only")).lower()
+        unsup_mode = str(cfg["analysis"]["unsupervised_stats_split"]).lower()
         if unsup_mode == "train_only":
             unsupervised_mask = m_tr
             logger.info("Unsupervised Stage-1 stats (missing rate, "
@@ -365,8 +356,7 @@ def run_stage1(cfg):
         # Without a time column any partition is noise: compute PSI on random
         # halves for the report, but force psi_mode='off' (local copy) so the
         # noise cannot move rank_score or drop features.
-        psi_partition = str(cfg["analysis"].get("psi_partition",
-                                                "train_halves")).lower()
+        psi_partition = str(cfg["analysis"]["psi_partition"]).lower()
         if time_col and time_col in meta_df.columns:
             if psi_partition == "train_vs_rest":
                 m_e, m_a = m_tr, np.asarray(m_va | m_oot, dtype=bool)

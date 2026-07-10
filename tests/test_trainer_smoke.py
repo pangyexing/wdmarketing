@@ -23,6 +23,8 @@ def _cfg():
             "xgb_base_params": {"objective": "binary:logistic",
                                 "tree_method": "hist", "verbosity": 0},
             "eval_metrics": ["aucpr", "auc"],
+            "early_stop_metric": "aucpr",
+            "random_seed": 42,
         },
     }
 

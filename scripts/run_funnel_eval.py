@@ -69,11 +69,13 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from predict_template import Predictor  # noqa: E402  (scripts/ on path)
 from wdm.config import load_config  # noqa: E402
-from wdm.metrics.ranking import _top_k_mask, lift_at_k  # noqa: E402
+from wdm.metrics.ranking import lift_at_k  # noqa: E402
+from wdm.model.funnel import (  # noqa: E402
+    funnel_rows, model_boundaries, parse_tier_values, write_markdown,
+)
 from wdm.model.fusion import fit_alpha, fuse  # noqa: E402
 from wdm.utils.logging import setup_logging  # noqa: E402
 from wdm.utils.paths import model_run_dir  # noqa: E402
-from wdm.utils.time_utils import split_by_yyyymmdd  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -82,123 +84,6 @@ logger = logging.getLogger(__name__)
 FUNNEL_STAGES = ["is_reg", "is_finish_task", "is_credit_succ"]
 QUAL_STAGES = ["is_credit_succ", "is_credit_1v1"]
 RAW_TIER_COLUMN = "credit_1v1"
-
-
-def _derive_boundaries(cfg):
-    """Fallback for old bundles: re-derive valid/oot start dts by re-running
-    the time split on the model's CURRENT training table. Returns
-    {valid_min_dt, oot_min_dt} or None for non-time splits."""
-    split_cfg = cfg["training"]["split"]
-    if split_cfg.get("strategy") != "time":
-        return None
-    time_col = cfg["data"]["time_column"]
-    path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
-    dt = pd.read_csv(path, usecols=[time_col])[time_col]
-    _m_tr, m_va, m_oot = split_by_yyyymmdd(
-        dt, list(split_cfg["ratios"]),
-        embargo_days=int(split_cfg.get("embargo_days", 0) or 0))
-    nums = pd.to_numeric(dt, errors="coerce")
-    out = {}
-    for key, mask in (("valid_min_dt", m_va), ("oot_min_dt", m_oot)):
-        out[key] = int(nums[mask].min()) if mask.any() else None
-    return out
-
-
-def _model_boundaries(name, cfg, bundle_dir):
-    """Read split_boundaries from the bundle manifest; fall back to deriving
-    from the current CSV (warned — drifts if the CSV was rebuilt)."""
-    manifest_path = Path(bundle_dir) / "run_manifest.json"
-    if manifest_path.is_file():
-        with open(str(manifest_path), "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        sb = manifest.get("split_boundaries")
-        if sb and sb.get("oot_min_dt") is not None:
-            return {"valid_min_dt": sb.get("valid_min_dt"),
-                    "oot_min_dt": sb.get("oot_min_dt"), "source": "manifest"}
-    derived = _derive_boundaries(cfg)
-    if derived is None:
-        return None
-    logger.warning("%s bundle has no persisted split_boundaries; re-derived from "
-                   "the current CSV (valid>=%s, oot>=%s) — stale if the table "
-                   "was rebuilt after training", name,
-                   derived["valid_min_dt"], derived["oot_min_dt"])
-    derived["source"] = "re-derived"
-    return derived
-
-
-def _parse_tier_values(spec):
-    """'1:120,2:290,3:790' -> {1.0: 120.0, 2.0: 290.0, 3.0: 790.0}"""
-    out = {}
-    for part in str(spec).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        key, _, val = part.partition(":")
-        out[float(key)] = float(val)
-    if not out:
-        raise ValueError("--tier-values parsed to an empty mapping: {0!r}".format(spec))
-    return out
-
-
-def _rate(mask_num, mask_den):
-    den = int(mask_den.sum())
-    if den == 0:
-        return float("nan")
-    return float(mask_num[mask_den].mean())
-
-
-def _lift(top_rate, base_rate):
-    if not np.isfinite(top_rate) or not np.isfinite(base_rate) or base_rate == 0:
-        return float("nan")
-    return top_rate / base_rate
-
-
-def _funnel_rows(score_name, scores, stage_flags, k, stages, value_vec=None):
-    """Tidy metric rows for one ranking score at one top-K fraction."""
-    mask, k_int = _top_k_mask(scores, k)
-    n = scores.size
-    all_rows = np.ones(n, dtype=bool)
-    rows = []
-
-    # Absolute view: each stage flag inside top-K vs the whole population.
-    for stage in stages:
-        flag = stage_flags[stage]
-        base = _rate(flag, all_rows)
-        top = _rate(flag, mask)
-        rows.append({
-            "score": score_name, "top_k_pct": k, "view": "absolute",
-            "stage": stage, "n_topk": k_int,
-            "pos_topk": int(flag[mask].sum()),
-            "base_rate": base, "topk_rate": top, "lift": _lift(top, base),
-        })
-
-    # Business-value capture (per-person mean value in top-K vs population).
-    if value_vec is not None:
-        base_v = float(value_vec.mean())
-        top_v = float(value_vec[mask].mean()) if k_int else float("nan")
-        rows.append({
-            "score": score_name, "top_k_pct": k, "view": "absolute",
-            "stage": "value_capture", "n_topk": k_int,
-            "pos_topk": int((value_vec[mask] > 0).sum()),
-            "base_rate": base_v, "topk_rate": top_v, "lift": _lift(top_v, base_v),
-        })
-
-    # Conditional view: step conversions inside top-K vs population steps.
-    prev_all = all_rows
-    prev_top = mask
-    for stage in stages:
-        flag = stage_flags[stage].astype(bool)
-        base = _rate(stage_flags[stage], prev_all)
-        top = _rate(stage_flags[stage], prev_top)
-        rows.append({
-            "score": score_name, "top_k_pct": k, "view": "conditional",
-            "stage": stage, "n_topk": int(prev_top.sum()),
-            "pos_topk": int(stage_flags[stage][prev_top].sum()),
-            "base_rate": base, "topk_rate": top, "lift": _lift(top, base),
-        })
-        prev_all = prev_all & flag
-        prev_top = prev_top & flag
-    return rows
 
 
 def _print_block(df, k, final_stage):
@@ -212,35 +97,6 @@ def _print_block(df, k, final_stage):
         print()
         print(title.format(k))
         print(block.to_string(index=False, float_format=lambda v: "{0:.4f}".format(v)))
-
-
-def _write_markdown(path, df, info, final_stage):
-    lines = ["# Fused funnel evaluation", ""]
-    for key, val in info:
-        lines.append("- **{0}**: {1}".format(key, val))
-    lines.append("")
-    lines.append("`fused` = calibrated resp x qual product; `fused_alpha` = "
-                 "resp^alpha x qual^(1-alpha) with alpha fit on the pre-OOT fit "
-                 "window. The `absolute` view compares each funnel stage rate in "
-                 "top-K vs the population (the `{0}` row is the end-to-end "
-                 "综合提升; `value_capture`, when present, compares per-person "
-                 "business value); the `conditional` view compares step "
-                 "conversions (reg, finish|reg, credit|finish) inside top-K vs "
-                 "the population.".format(final_stage))
-    for k in sorted(df["top_k_pct"].unique()):
-        for view in ("absolute", "conditional"):
-            block = df[(df["top_k_pct"] == k) & (df["view"] == view)]
-            lines.append("")
-            lines.append("## Top {0:.0%} — {1}".format(k, view))
-            lines.append("")
-            lines.append("| score | stage | n_topk | pos_topk | base_rate | topk_rate | lift |")
-            lines.append("|---|---|---|---|---|---|---|")
-            for _, r in block.iterrows():
-                lines.append("| {0} | {1} | {2} | {3} | {4:.4f} | {5:.4f} | {6:.4f} |".format(
-                    r["score"], r["stage"], r["n_topk"], r["pos_topk"],
-                    r["base_rate"], r["topk_rate"], r["lift"]))
-    with open(str(path), "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
 
 
 def main():
@@ -297,7 +153,7 @@ def main():
     if args.tier_values:
         if args.qual_stage != "is_credit_1v1":
             raise SystemExit("--tier-values only applies to --qual-stage is_credit_1v1.")
-        tier_values = _parse_tier_values(args.tier_values)
+        tier_values = parse_tier_values(args.tier_values)
 
     models = [("resp", args.resp_product, args.resp_run_id, resp_cfg),
               ("qual", args.qual_product, args.qual_run_id, qual_cfg)]
@@ -312,7 +168,7 @@ def main():
         if not bundle.is_dir():
             raise FileNotFoundError("{0} bundle not found: {1}".format(name, bundle))
         preds[name] = Predictor(bundle)
-        bounds[name] = _model_boundaries(name, cfg, bundle)
+        bounds[name] = model_boundaries(name, cfg, bundle)
         logger.info("%s bundle: %s (%d features, calibration=%s)", name, bundle,
                     len(preds[name].base_features), preds[name].has_calibration)
 
@@ -445,8 +301,8 @@ def main():
     rows = []
     for k in ks:
         for name, scores in rankings:
-            rows.extend(_funnel_rows(name, scores, flags_eval, k, funnel_stages,
-                                     value_vec=value_eval))
+            rows.extend(funnel_rows(name, scores, flags_eval, k, funnel_stages,
+                                    value_vec=value_eval))
     result = pd.DataFrame(rows, columns=[
         "score", "top_k_pct", "view", "stage", "n_topk", "pos_topk",
         "base_rate", "topk_rate", "lift"])
@@ -491,7 +347,7 @@ def main():
 
     csv_path = out_dir / "funnel_eval.csv"
     result.to_csv(str(csv_path), index=False)
-    _write_markdown(out_dir / "funnel_eval.md", result, info, args.qual_stage)
+    write_markdown(out_dir / "funnel_eval.md", result, info, args.qual_stage)
     print("Wrote {0}".format(csv_path))
     print("Wrote {0}".format(out_dir / "funnel_eval.md"))
 

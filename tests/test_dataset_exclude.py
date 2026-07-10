@@ -39,6 +39,8 @@ def _make_env(tmp_path, exclude_rows=None, sample_weight=None):
         "training": {
             "random_seed": 42,
             "split": {"strategy": "time", "ratios": [0.7, 0.15, 0.15]},
+            # required key (defaults live only in configs/global.yaml)
+            "calibration_split_fraction": 0.5,
         },
         "selected_features": {"active_version": "v1",
                               "versions_dir": "artifacts/prod/selected_features"},

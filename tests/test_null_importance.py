@@ -82,6 +82,8 @@ def _cfg(repo_root):
         "training": {
             "random_seed": 42,
             "final_feature_count": 30,
+            # required key (defaults live only in configs/global.yaml)
+            "calibration_split_fraction": 0.5,
             "split": {"strategy": "stratified", "ratios": [0.7, 0.15, 0.15]},
             "xgb_base_params": {"objective": "binary:logistic",
                                 "tree_method": "hist", "verbosity": 0},

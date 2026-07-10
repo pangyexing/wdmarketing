@@ -117,30 +117,12 @@ def _resolve_probing_params(cfg):
 
 
 def _importance_to_df(booster, feature_names):
-    """Extract gain/weight/cover per feature, aligned to full feature list.
+    """gain/weight/cover per feature via the shared screen kernel
+    (wdm.model.xgb_screen — same extraction as null_importance and the
+    Stage-2 pruner, including the fN-key fallback)."""
+    from wdm.model.xgb_screen import importance_frame
 
-    XGBoost 1.5.2: get_score returns {fN: value} where fN indexes into
-    feature_names passed to DMatrix. When DMatrix had feature_names set
-    the keys are the original names directly. Features not used by any
-    split are absent from get_score → filled with 0.
-    """
-    rows = {name: {"gain": 0.0, "weight": 0.0, "cover": 0.0}
-            for name in feature_names}
-    for imp_type in ("gain", "weight", "cover"):
-        d = booster.get_score(importance_type=imp_type)
-        for k, v in d.items():
-            if k in rows:
-                rows[k][imp_type] = float(v)
-            else:
-                # Defensive: fN-style keys if feature_names weren't propagated.
-                if k.startswith("f") and k[1:].isdigit():
-                    idx = int(k[1:])
-                    if 0 <= idx < len(feature_names):
-                        rows[feature_names[idx]][imp_type] = float(v)
-    df = pd.DataFrame.from_dict(rows, orient="index")
-    df.index.name = "feature"
-    df = df.reset_index()
-    return df
+    return importance_frame(booster, feature_names)
 
 
 def _rank_pct(series):
@@ -232,15 +214,10 @@ def run_probing(cfg, cache_dir, out_dir):
 
     # 5) Train with early stopping on valid
     params, num_boost_round, early_stopping = _resolve_probing_params(cfg)
-    # Align the imbalance regime with the deployed model (and with the
-    # null-importance screen): an unweighted probing model under-ranks
-    # features whose signal concentrates in the rare positive class.
-    # Explicit xgb_params.scale_pos_weight still wins.
-    if "scale_pos_weight" not in params:
-        n_pos = float((y_tr == 1).sum())
-        n_neg = float(y_tr.size - n_pos)
-        if n_pos > 0:
-            params["scale_pos_weight"] = n_neg / n_pos
+    # Shared imbalance default (scale_pos_weight = neg/pos) — same regime as
+    # null_importance, the Stage-2 pruner and the deployed model.
+    from wdm.model.xgb_screen import apply_scale_pos_weight_default
+    apply_scale_pos_weight_default(params, y_tr)
     evals_result = {}
     booster = xgb.train(
         params=params,

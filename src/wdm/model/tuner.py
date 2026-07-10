@@ -110,7 +110,7 @@ def run_hyperopt(X_train, y_train, cfg, trials_path=None, max_evals=None,
     # must be reproducible under colsample/subsample sampling.
     base.setdefault("seed", seed)
 
-    objective_name = cfg["training"].get("tuner_objective", "aucpr")
+    objective_name = cfg["training"]["tuner_objective"]
     cv_strategy = cfg["training"].get("cv_strategy", "stratified")
     if objective_name == "precision_at_k":
         k_pct = float(cfg["training"].get("top_k_pct", 0.10))

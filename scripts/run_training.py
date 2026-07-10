@@ -92,7 +92,7 @@ def main():
 
     prog.finish()
 
-    objective = cfg["training"].get("tuner_objective", "aucpr")
+    objective = cfg["training"]["tuner_objective"]
     print()
     print("=" * 60)
     print("Stage 2 complete.")

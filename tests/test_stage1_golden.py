@@ -60,7 +60,7 @@ def _strip_created_at(text):
 
 @pytest.fixture(scope="module")
 def stage1_artifacts(tmp_path_factory):
-    from wdm.analysis.selector import run_stage1
+    from wdm.pipeline.stage1 import run_stage1
     from wdm.utils.paths import report_dir, selected_features_dir
 
     repo = tmp_path_factory.mktemp("golden_repo")

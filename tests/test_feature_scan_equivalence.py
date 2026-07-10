@@ -16,7 +16,7 @@ from wdm.analysis.correlation import (
 from wdm.analysis.feature_scan import run_feature_scan
 from wdm.analysis.iv_woe import compute_iv_table
 from wdm.analysis.lift import compute_feature_lift_table
-from wdm.analysis.missing import compute_missing_stats
+from wdm.analysis.missing_stats import compute_missing_stats
 from wdm.analysis.psi import compute_psi_table_single_source
 from wdm.io.chunked_reader import iter_column_chunks
 from wdm.preprocess.missing import MissingSpec, get_spec
@@ -148,7 +148,7 @@ def test_stale_manifest_rejected(setup, scan_result):
 # ---------- scan-cache lifecycle inside run_stage1 ----------
 
 def _run_stage1_small(tmp_path, scan_cache_overrides=None):
-    from wdm.analysis.selector import run_stage1
+    from wdm.pipeline.stage1 import run_stage1
     dataset_gen.prepare_repo(tmp_path, n_rows=1200)
     cfg = dataset_gen.build_cfg(tmp_path)
     if scan_cache_overrides is not None:

@@ -13,14 +13,16 @@ import pandas as pd
 import pytest
 import yaml
 
+from wdm.utils.window_patterns import (
+    WINDOW_PATTERN_PRESETS,
+    resolve_patterns,
+)
 from wdm.analysis.family import (
-    _WINDOW_PATTERN_PRESETS,
-    _resolve_patterns,
     effective_family_policy,
     parse_families,
     rank_within_family,
 )
-from wdm.analysis.selector import _rank_and_auto_keep
+from wdm.analysis.selector import rank_and_auto_keep
 
 
 # ---------- Part 0 fixtures ----------
@@ -68,7 +70,7 @@ def test_multi_pattern_first_match_wins():
 
 def test_preset_suffix_day_backward_compatible():
     legacy = _cfg_single_pattern(
-        _WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
+        WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
         window_order=["7d", "30d", "all"],
     )
     new = _cfg_with_patterns([{"preset": "suffix_day"}], window_order=["7d", "30d", "all"])
@@ -102,7 +104,7 @@ def test_config_validation_rejects_missing_named_group():
         window_order=["7d", "30d"],
     )
     with pytest.raises(ValueError, match=r"named groups"):
-        _resolve_patterns(cfg)
+        resolve_patterns(cfg)
 
 
 def test_suffix_mon_preset_recognizes_month_windows():
@@ -220,7 +222,7 @@ def _policy(**kwargs):
     base.update(kwargs)
     return {
         "feature_groups": {
-            "window_pattern": _WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
+            "window_pattern": WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
             "window_order": ["7d", "30d", "90d", "all"],
             "family_policy": base,
         },
@@ -273,7 +275,7 @@ def _rank_df(missing_rate=None):
 def test_window_penalty_zero_preserves_legacy():
     cfg = _policy(window_penalty_gamma=0.0)
     df = _rank_df()
-    out = _rank_and_auto_keep(df.copy(), cfg)
+    out = rank_and_auto_keep(df.copy(), cfg)
     # With equal signals, rank_score should be equal (no window bias applied)
     rs = out.set_index("feature")["rank_score"]
     assert abs(rs["foo_7d"] - rs["foo_all"]) < 1e-9
@@ -285,7 +287,7 @@ def test_window_penalty_demotes_long_when_equal():
         window_penalty_table={"7d": 0.0, "30d": 0.1, "90d": 0.2, "all": 0.4},
     )
     df = _rank_df()
-    out = _rank_and_auto_keep(df.copy(), cfg)
+    out = rank_and_auto_keep(df.copy(), cfg)
     rs = out.set_index("feature")["rank_score"]
     # 7d penalty 0.0, all penalty 0.4 → 7d strictly higher rank_score
     assert rs["foo_7d"] > rs["foo_all"]
@@ -362,7 +364,7 @@ def test_row_penalty_respects_per_group_gamma():
     → different rank_score."""
     cfg = {
         "feature_groups": {
-            "window_pattern": _WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
+            "window_pattern": WINDOW_PATTERN_PRESETS["suffix_day"]["pattern"],
             "window_order": ["7d", "30d", "90d", "all"],
             "family_policy": {
                 "window_penalty_gamma": 0.5,
@@ -384,7 +386,7 @@ def test_row_penalty_respects_per_group_gamma():
          "family_kept": True, "group_kept": True, "corr_cluster": -1,
          "semantic_group": "cc", "_hard_drop_reason": ""},
     ])
-    out = _rank_and_auto_keep(df.copy(), cfg)
+    out = rank_and_auto_keep(df.copy(), cfg)
     rs = out.set_index("feature")["rank_score"]
     # bureau gamma=0 → zero penalty contribution; cc uses global 0.5 → −0.5*0.4 = −0.2
     # Both have identical z-scored signals (zero since equal), so diff is exactly 0.2

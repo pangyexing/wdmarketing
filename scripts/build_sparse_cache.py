@@ -23,9 +23,6 @@ from wdm.io.sparse_cache import (  # noqa: F401  (re-exported for back-compat)
 )
 from wdm.utils.logging import setup_logging
 
-# Back-compat alias: older callers imported the underscore name from here.
-_resolve_cache_dir = resolve_cache_dir
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

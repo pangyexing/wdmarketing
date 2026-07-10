@@ -74,6 +74,7 @@ def _cfg(tmp_path, csv, sf_dir):
             "xgb_base_params": {"objective": "binary:logistic",
                                 "tree_method": "hist", "verbosity": 0},
             "eval_metrics": ["aucpr", "auc"],
+            "early_stop_metric": "aucpr",
         },
         "missing": {
             "global": {

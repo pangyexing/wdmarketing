@@ -12,7 +12,7 @@ including the quirky-but-load-bearing corners:
 import numpy as np
 import pandas as pd
 
-from wdm.analysis.selector import _apply_hard_filters, _rank_and_auto_keep
+from wdm.analysis.selector import apply_hard_filters, rank_and_auto_keep
 
 CFG = {"analysis": {
     "missing_rate_max": 0.95, "iv_min": 0.02, "psi_cutoff": 0.25,
@@ -65,20 +65,20 @@ EXPECTED = [
 
 
 def test_hard_filters_and_auto_keep_edge_cases():
-    out = _rank_and_auto_keep(_apply_hard_filters(_input_df(), CFG), CFG)
+    out = rank_and_auto_keep(apply_hard_filters(_input_df(), CFG), CFG)
     got = [(r.feature, bool(r.auto_keep), r.drop_reason,
             round(float(r.rank_score), 10)) for r in out.itertuples()]
     assert got == EXPECTED
 
 
 def test_helper_columns_are_dropped():
-    out = _rank_and_auto_keep(_apply_hard_filters(_input_df(), CFG), CFG)
+    out = rank_and_auto_keep(apply_hard_filters(_input_df(), CFG), CFG)
     assert "_hard_drop" not in out.columns
     assert "_hard_drop_reason" not in out.columns
 
 
 def test_no_lift_keep_min_disables_soft_gate():
     cfg = {"analysis": dict(CFG["analysis"], lift_keep_min=None)}
-    out = _apply_hard_filters(_input_df(), cfg)
+    out = apply_hard_filters(_input_df(), cfg)
     by_feat = dict(zip(out["feature"], out["_hard_drop_reason"]))
     assert by_feat["f_lowiv_save"] == "low_iv"

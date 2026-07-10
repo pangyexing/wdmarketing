@@ -47,6 +47,8 @@ def _make_cfg(tmp_path, versions_dir, csv_path,
         "training": {
             "split": {"strategy": "time", "ratios": list(ratios)},
             "random_seed": 42,
+            # required key (defaults live only in configs/global.yaml)
+            "calibration_split_fraction": 0.5,
         },
         "missing": {
             "global": {

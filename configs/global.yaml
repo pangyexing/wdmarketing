@@ -7,7 +7,7 @@ feature_groups:
   #     (b) multi-pattern form (preferred — supports mixed naming conventions,
   #         e.g. xxx_7d / xxx_d7 / xxx_近7天 / xxx_last7days / xxx_1mon / xxx_1y):
   #       window_patterns:
-  #         - preset: suffix_day          # references src/wdm/analysis/family.py:_WINDOW_PATTERN_PRESETS
+  #         - preset: suffix_day          # references src/wdm/utils/window_patterns.py:WINDOW_PATTERN_PRESETS
   #         - preset: chinese_jin_days
   #         - pattern: '^(?P<base>.+?)_W(?P<window>\d+)$'   # inline custom
   #           alias_rule: "{window}d"

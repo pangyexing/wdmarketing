@@ -320,21 +320,3 @@ def rank_and_auto_keep(df, cfg):
     df["drop_reason"] = drop_reason
     return df.drop(columns=["_hard_drop", "_hard_drop_reason"], errors="ignore")
 
-
-# Backward-compat aliases: these were module-private until the stage1
-# extraction made them cross-module API. Existing tests/callers import the
-# underscore names.
-_build_ranked_report = build_ranked_report
-_apply_hard_filters = apply_hard_filters
-_rank_and_auto_keep = rank_and_auto_keep
-
-
-def run_stage1(cfg):
-    """Backward-compatible entrypoint: the Stage-1 orchestration moved to
-    wdm.pipeline.stage1; existing callers keep importing it from here. The
-    import is deferred so selector never imports stage1 at module scope
-    (stage1 imports this module's scoring helpers — an eager import here
-    would recreate the circular import).
-    """
-    from wdm.pipeline.stage1 import run_stage1 as _run_stage1
-    return _run_stage1(cfg)

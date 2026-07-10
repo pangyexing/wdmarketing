@@ -63,7 +63,7 @@ def _save_booster(cfg, booster, run_dir):
     bin/binary -> booster.bin (xgboost native binary), ubj -> booster.ubj
     (needs xgboost >= 1.6). Returns the list of written file names.
     """
-    formats = cfg.get("export", {}).get("model_format") or ["json"]
+    formats = cfg["export"]["model_format"] or ["json"]
     if isinstance(formats, str):
         formats = [formats]
     # normalize + dedupe, preserving order
@@ -462,7 +462,7 @@ def export_bundle(cfg, data, booster, evals_result, best_params, best_params_los
         "label_column": cfg["data"]["label_column"],
         "train_path": cfg["data"]["train_path"],
         "time_column": cfg["data"].get("time_column"),
-        "tuner_objective": cfg["training"].get("tuner_objective", "aucpr"),
+        "tuner_objective": cfg["training"]["tuner_objective"],
         "cv_strategy": cfg["training"].get("cv_strategy", "stratified"),
         "sample_weight": cfg["training"].get("sample_weight"),
         "exclude_rows": cfg["data"].get("exclude_rows"),
