@@ -180,6 +180,22 @@ def test_indicator_features_pair_with_surviving_bases(tmp_path):
     assert out.X_train.shape[1] == len(out.feature_list)
 
 
+def test_permutation_row_subsample_keeps_signal(tmp_path):
+    """permutation_row_subsample < 1 scores on a seeded valid subset — the
+    ranking must still surface the signal features."""
+    n_base = 18
+    base = ["f{0}".format(i) for i in range(n_base)]
+    signal_idx = [0, 1, 2]
+    data = _make_signal_data(2000, base, signal_idx=signal_idx, seed=11)
+    cfg = _cfg(final_n=5, candidate_n=n_base, ranking_method="permutation",
+               n_permutation_repeats=2)
+    cfg["training"]["stage2_pruning"]["permutation_row_subsample"] = 0.5
+    out = maybe_prune_to_final(data, cfg, run_dir=tmp_path)
+    kept = set(out.base_feature_list)
+    survived = sum(1 for f in [base[i] for i in signal_idx] if f in kept)
+    assert survived >= 2
+
+
 @pytest.mark.parametrize("method", ["gain", "stability", "permutation",
                                     "permutation_stability"])
 def test_each_ranking_method_keeps_signal(tmp_path, method):

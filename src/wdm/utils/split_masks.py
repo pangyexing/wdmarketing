@@ -12,7 +12,8 @@ import logging
 import numpy as np
 import pandas as pd
 
-from wdm.utils.time_utils import split_by_yyyymmdd, split_stratified
+from wdm.utils.time_utils import (
+    split_by_yyyymmdd, split_psi_halves, split_stratified)
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +83,35 @@ def compute_split_masks(df, cfg):
         raise ValueError("Unknown split strategy: {0}".format(strategy))
     m_tr, m_va, m_oot = scatter_masks(included, sub_masks)
     return m_tr, m_va, m_oot, included
+
+
+def psi_partition_masks(cfg, meta_df, masks=None):
+    """(mask_expected, mask_actual, has_time) per analysis.psi_partition.
+
+    The single implementation of the selection-PSI partition, shared by
+    Stage-1 and the per-feature plots so both show the same drift:
+      train_halves  — earlier vs later half WITHIN the train split (default)
+      halves        — earlier vs later half of the whole (included) window
+      train_vs_rest — train vs valid+oot (deployment-facing, opt-in)
+    Without a time column returns seeded random halves and has_time=False —
+    the partition is noise and callers must treat the PSI as informational.
+    masks: optional precomputed compute_split_masks output.
+    """
+    time_col = cfg["data"].get("time_column")
+    if masks is None:
+        masks = compute_split_masks(meta_df, cfg)
+    m_tr, m_va, m_oot, included = masks
+    psi_partition = str(cfg["analysis"]["psi_partition"]).lower()
+    if time_col and time_col in meta_df.columns:
+        if psi_partition == "train_vs_rest":
+            return m_tr, np.asarray(m_va | m_oot, dtype=bool), True
+        if psi_partition == "halves":
+            m_e, m_a = scatter_masks(
+                included, split_psi_halves(meta_df[time_col][included]))
+            return m_e, m_a, True
+        m_e, m_a = scatter_masks(
+            m_tr, split_psi_halves(meta_df[time_col][m_tr]))
+        return m_e, m_a, True
+    rng = np.random.RandomState(int(cfg["training"]["random_seed"]))
+    r = rng.rand(len(meta_df))
+    return (r < 0.5) & included, (r >= 0.5) & included, False

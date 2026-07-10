@@ -115,11 +115,25 @@ def _rank_permutation(data, prune_cfg, seed=0):
     n_repeats = int(prune_cfg.get("n_permutation_repeats", 3))
     rng = np.random.RandomState(int(prune_cfg.get("permutation_seed", seed)))
 
-    base_score = pr_auc(data.y_valid, _predict_valid(booster, data.X_valid))
+    # Permutation scoring predicts the whole valid matrix once per
+    # (feature × repeat) — the dominant funnel cost on wide candidate pools.
+    # permutation_row_subsample < 1.0 scores on a seeded row subset instead
+    # (default 1.0 = exact legacy behavior).
+    X_val, y_val = data.X_valid, data.y_valid
+    row_frac = float(prune_cfg.get("permutation_row_subsample", 1.0) or 1.0)
+    if 0.0 < row_frac < 1.0:
+        n_sub = max(1, int(round(X_val.shape[0] * row_frac)))
+        sub_idx = rng.choice(X_val.shape[0], size=n_sub, replace=False)
+        X_val, y_val = X_val[sub_idx], y_val[sub_idx]
+        logger.info("permutation importance on %d/%d valid rows "
+                    "(permutation_row_subsample=%.2f)",
+                    n_sub, data.X_valid.shape[0], row_frac)
+
+    base_score = pr_auc(y_val, _predict_valid(booster, X_val))
 
     # One writable copy of X_valid; restore each column after shuffling so the
     # next feature's measurement starts from the unmodified valid matrix.
-    X_perm = data.X_valid.copy()
+    X_perm = X_val.copy()
     n_features = X_perm.shape[1]
     drops = np.zeros(n_features, dtype=np.float64)
     for j in range(n_features):
@@ -127,7 +141,7 @@ def _rank_permutation(data, prune_cfg, seed=0):
         repeat_drops = np.zeros(n_repeats, dtype=np.float64)
         for r in range(n_repeats):
             rng.shuffle(X_perm[:, j])
-            score = pr_auc(data.y_valid, _predict_valid(booster, X_perm))
+            score = pr_auc(y_val, _predict_valid(booster, X_perm))
             repeat_drops[r] = base_score - score
         X_perm[:, j] = col_backup
         drops[j] = float(repeat_drops.mean())

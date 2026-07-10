@@ -100,7 +100,8 @@ done
 python3 - <<PY
 import json
 m = json.load(open('$R2/metrics.json'))
-oot = m['oot']
+# metrics.json is a records list (one row per split), not a dict.
+oot = next(r for r in m if r['split'] == 'oot')
 print('OOT PR-AUC=%.3f ROC-AUC=%.3f Lift@10%%=%.2f' %
       (oot['pr_auc'], oot['roc_auc'], oot['lift_at_k']))
 assert oot['roc_auc']   >= 0.70, 'ROC-AUC too low — training pipeline may be broken'

@@ -44,8 +44,7 @@ from wdm.utils.paths import (
 )
 from wdm.utils.labels import validate_binary_label
 from wdm.utils.progress import StageProgress
-from wdm.utils.split_masks import compute_split_masks, scatter_masks
-from wdm.utils.time_utils import split_psi_halves
+from wdm.utils.split_masks import compute_split_masks, psi_partition_masks
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +300,6 @@ def run_stage1(cfg):
         # exactly, so every fitted Stage-1 statistic sees the same "train"
         # rows the final model trains on.
         split_cfg = cfg["training"]["split"]
-        seed = int(cfg["training"]["random_seed"])
         m_tr, m_va, m_oot, included = compute_split_masks(meta_df, cfg)
         validate_binary_label(y[included], label_col)
 
@@ -357,26 +355,19 @@ def run_stage1(cfg):
         # halves for the report, but force psi_mode='off' (local copy) so the
         # noise cannot move rank_score or drop features.
         psi_partition = str(cfg["analysis"]["psi_partition"]).lower()
-        if time_col and time_col in meta_df.columns:
+        m_e, m_a, psi_has_time = psi_partition_masks(
+            cfg, meta_df, masks=(m_tr, m_va, m_oot, included))
+        if psi_has_time:
             if psi_partition == "train_vs_rest":
-                m_e, m_a = m_tr, np.asarray(m_va | m_oot, dtype=bool)
                 logger.info("PSI partition: train split (n=%d) vs valid+oot "
                             "(n=%d) — deployment-facing drift; valid/OOT "
                             "rows DO enter the selection PSI.",
                             int(m_e.sum()), int(m_a.sum()))
-            elif psi_partition == "halves":
-                m_e, m_a = scatter_masks(
-                    included, split_psi_halves(meta_df[time_col][included]))
-            else:  # train_halves
-                m_e, m_a = scatter_masks(
-                    m_tr, split_psi_halves(meta_df[time_col][m_tr]))
+            elif psi_partition == "train_halves":
                 logger.info("PSI partition: train-split halves (%d vs %d "
                             "rows) — valid/OOT rows never enter the "
                             "selection PSI.", int(m_e.sum()), int(m_a.sum()))
         else:
-            rng = np.random.RandomState(seed)
-            r = rng.rand(len(meta_df))
-            m_e, m_a = (r < 0.5) & included, (r >= 0.5) & included
             cfg = dict(cfg)
             cfg["analysis"] = dict(cfg["analysis"])
             cfg["analysis"]["psi_mode"] = "off"
@@ -421,8 +412,23 @@ def run_stage1(cfg):
                     mmap=bool(scan_cache_cfg.get("mmap", True)))
             else:
                 # Fallback path: re-reads the CSV per block pair — needs no
-                # scratch disk but the cost is quadratic in chunk count.
+                # scratch disk but the cost is quadratic in chunk count. On
+                # wide tables that silently turns a minutes-long run into
+                # hours, so it is a hard error unless explicitly allowed.
                 n_pair_parses = n_chunks * (n_chunks + 1) // 2
+                slow_corr_max = int(cfg["analysis"].get(
+                    "slow_correlation_max_features", 500))
+                if (len(features) > slow_corr_max
+                        and not bool(cfg["analysis"].get(
+                            "allow_slow_correlation", False))):
+                    raise RuntimeError(
+                        "scan_cache disabled with {0} features (> {1}): "
+                        "correlation pass-2 would re-parse the full CSV ~{2} "
+                        "times. Enable io.scan_cache (recommended; "
+                        "~rows×features×8 bytes of scratch disk) or set "
+                        "analysis.allow_slow_correlation: true to accept the "
+                        "quadratic cost.".format(
+                            len(features), slow_corr_max, n_pair_parses))
                 logger.warning(
                     "scan_cache disabled — correlation pass-2 will re-parse "
                     "the full CSV ~%d times (%d chunks, one parse per block "

@@ -222,10 +222,13 @@ def sanity_check_fill_value(arr_nan, fill_value, feature, fill_constant=None):
             .format(fill_value, feature, p01, mx))
 
 
-def fit_missing(df_train, spec_map, run_sanity_check=True):
+def fit_missing(df_train, spec_map, run_sanity_check=True, nan_cache=None):
     """Fit per-column statistics on the training frame. Returns Dict[feature, FittedStats].
 
     df_train is an in-memory pandas DataFrame (Stage 2 has <=200 features so it fits).
+    nan_cache: optional {feature: (arr, mask)} of precomputed to_nan_array
+    results (training semantics) — build_dataset shares one conversion per
+    column across fit/apply/indicator/all-NA passes.
     """
     stats = {}
     # Sanity check only applies to user-specified sentinel-style fills, not
@@ -234,7 +237,10 @@ def fit_missing(df_train, spec_map, run_sanity_check=True):
     sanity_eligible = {"constant", "zero", "special"}
     for feature in df_train.columns:
         spec = get_spec(spec_map, feature)
-        arr, mask = to_nan_array(df_train[feature], spec)
+        if nan_cache is not None and feature in nan_cache:
+            arr, mask = nan_cache[feature]
+        else:
+            arr, mask = to_nan_array(df_train[feature], spec)
         fill_val = _resolve_fill_value(arr, spec)
         if run_sanity_check and spec.fill_strategy in sanity_eligible:
             sanity_check_fill_value(arr, fill_val, feature, spec.fill_constant)
@@ -251,16 +257,21 @@ def fit_missing(df_train, spec_map, run_sanity_check=True):
     return stats
 
 
-def apply_missing_for_training(df, spec_map, fitted):
+def apply_missing_for_training(df, spec_map, fitted, nan_cache=None):
     """Apply sentinel/negative/empty → NaN → fill per column. Returns a new DataFrame.
 
     Stage 2 contract: valid/oot DataFrames MUST be transformed with the same
     `fitted` produced on train — never re-fit.
+    nan_cache: optional {feature: (arr, mask)} of precomputed to_nan_array
+    results for this frame (see fit_missing).
     """
     out = {}
     for feature in df.columns:
         spec = get_spec(spec_map, feature)
-        arr, _mask = to_nan_array(df[feature], spec)
+        if nan_cache is not None and feature in nan_cache:
+            arr, _mask = nan_cache[feature]
+        else:
+            arr, _mask = to_nan_array(df[feature], spec)
         fs = fitted.get(feature)
         if fs is None or fs.fill_strategy == "keep_nan" or (
                 isinstance(fs.fill_value, float) and math.isnan(fs.fill_value)

@@ -186,6 +186,22 @@ def test_cache_removed_on_failure(tmp_path, monkeypatch):
     assert not list(base.glob("scan_*"))
 
 
+def test_disabled_cache_wide_table_hard_guard(tmp_path):
+    """With scan_cache off and more features than
+    analysis.slow_correlation_max_features, Stage-1 must refuse to run the
+    quadratic CSV-reparsing fallback unless explicitly allowed."""
+    from wdm.pipeline.stage1 import run_stage1
+    dataset_gen.prepare_repo(tmp_path, n_rows=1200)
+    cfg = dataset_gen.build_cfg(tmp_path)
+    cfg["io"]["scan_cache"] = {"enabled": False}
+    cfg["analysis"]["slow_correlation_max_features"] = 3
+    with pytest.raises(RuntimeError):
+        run_stage1(cfg)
+    # explicit opt-in unblocks the fallback
+    cfg["analysis"]["allow_slow_correlation"] = True
+    run_stage1(cfg)
+
+
 def test_disabled_cache_falls_back_to_csv_path(tmp_path):
     base = _run_stage1_small(tmp_path, {"enabled": False})
     assert not base.exists() or not list(base.glob("scan_*"))

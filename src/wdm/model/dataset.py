@@ -152,46 +152,51 @@ def build_dataset(cfg, version=None):
     df_va = df.loc[m_va, feats].copy()
     df_oot = df.loc[m_oot, feats].copy()
 
+    # One to_nan_array per column per split (training semantics), shared by
+    # the indicator gate, fit_missing, apply_missing_for_training and the
+    # all-NA row mask — previously recomputed up to 4x per column.
+    def _nan_cache(frame):
+        return {feat: to_nan_array(frame[feat], get_spec(spec_map, feat))
+                for feat in feats}
+
+    cache_tr = _nan_cache(df_tr)
+    cache_va = _nan_cache(df_va)
+    cache_oot = _nan_cache(df_oot)
+
     indicator_feats = []
     if generate_indicator:
         for feat in feats:
-            spec = get_spec(spec_map, feat)
-            arr, mask = to_nan_array(df_tr[feat], spec)
-            if float(mask.mean()) >= indicator_threshold:
+            if float(cache_tr[feat][1].mean()) >= indicator_threshold:
                 indicator_feats.append("{0}__isnan".format(feat))
     if indicator_feats:
         logger.info("Generating %d missing indicators: %s", len(indicator_feats),
                     indicator_feats[:5] + (["..."] if len(indicator_feats) > 5 else []))
 
     # Fit missing stats on TRAIN only
-    fitted = fit_missing(df_tr, spec_map)
+    fitted = fit_missing(df_tr, spec_map, nan_cache=cache_tr)
 
     # Build a little helper that applies missing plus adds indicator columns
-    def _apply(frame):
-        out = apply_missing_for_training(frame, spec_map, fitted)
+    def _apply(frame, cache):
+        out = apply_missing_for_training(frame, spec_map, fitted,
+                                         nan_cache=cache)
         for ind in indicator_feats:
             base = ind[:-len("__isnan")]
-            spec = get_spec(spec_map, base)
-            _arr, mask = to_nan_array(frame[base], spec)
-            out[ind] = mask.astype(np.int8)
+            out[ind] = cache[base][1].astype(np.int8)
         return out
 
-    def _all_na_row_mask(frame):
+    def _all_na_row_mask(cache, n_rows):
         # True where every base feature is NaN after sentinel/negative/empty
         # rules. Drives the all-NA row filter below.
-        n_rows = len(frame)
         all_na = np.ones(n_rows, dtype=bool)
         for feat in feats:
-            spec = get_spec(spec_map, feat)
-            _arr, mask = to_nan_array(frame[feat], spec)
-            all_na &= mask
+            all_na &= cache[feat][1]
             if not all_na.any():
                 break
         return all_na
 
-    X_tr = _apply(df_tr).values.astype(np.float32)
-    X_va = _apply(df_va).values.astype(np.float32)
-    X_oot = _apply(df_oot).values.astype(np.float32)
+    X_tr = _apply(df_tr, cache_tr).values.astype(np.float32)
+    X_va = _apply(df_va, cache_va).values.astype(np.float32)
+    X_oot = _apply(df_oot, cache_oot).values.astype(np.float32)
 
     y_all = df[label_col].astype(np.int64).values
     y_tr = y_all[m_tr]
@@ -221,9 +226,10 @@ def build_dataset(cfg, version=None):
     #   - train / valid : drop (no signal for learning / early-stopping).
     #   - oot           : keep (evaluation must reflect production distribution;
     #                     evaluator reports an extra "oot_excl_all_na" row).
-    all_na_tr = _all_na_row_mask(df_tr)
-    all_na_va = _all_na_row_mask(df_va)
-    all_na_oot = _all_na_row_mask(df_oot)
+    all_na_tr = _all_na_row_mask(cache_tr, len(df_tr))
+    all_na_va = _all_na_row_mask(cache_va, len(df_va))
+    all_na_oot = _all_na_row_mask(cache_oot, len(df_oot))
+    del cache_tr, cache_va, cache_oot
 
     train_mask = np.asarray(m_tr).copy()
     valid_mask = np.asarray(m_va).copy()

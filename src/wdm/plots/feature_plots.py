@@ -200,16 +200,26 @@ def run_per_feature_plots(cfg, bin_specs):
     top = summary.sort_values("rank_score", ascending=False).head(top_n)
 
     path = Path(cfg["_repo_root"]) / cfg["data"]["train_path"]
-    raw = pd.read_csv(path)
-    y = raw[cfg["data"]["label_column"]].values
+    label_col = cfg["data"]["label_column"]
+    time_col = cfg["data"].get("time_column")
+    exclude_rows = cfg["data"].get("exclude_rows") or []
+    # Only the plotted features + the mask columns — a full read of a
+    # thousands-wide table for 50 plots re-parsed everything for nothing.
+    needed = list(dict.fromkeys(
+        top["feature"].tolist() + [label_col]
+        + ([time_col] if time_col else [])
+        + [r["column"] for r in exclude_rows]))
+    raw = pd.read_csv(path, usecols=needed)
+    y = raw[label_col].values
 
     from wdm.preprocess.missing import build_missing_spec, get_spec, to_nan_array
     spec_map = build_missing_spec(cfg)
 
-    rng = np.random.RandomState(cfg["training"]["random_seed"])
-    r = rng.rand(len(raw))
-    m_e = r < 0.5
-    m_a = ~m_e
+    # Same PSI partition as the Stage-1 selection PSI (train_halves by
+    # default), instead of the old random halves that never matched the
+    # reported psi column.
+    from wdm.utils.split_masks import psi_partition_masks
+    m_e, m_a, _psi_has_time = psi_partition_masks(cfg, raw)
 
     generated = []
     for _, row in track(top.iterrows(), total=len(top),

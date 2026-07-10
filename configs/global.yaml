@@ -143,6 +143,12 @@ analysis:
   # Correlation edges whose pairwise-complete overlap fraction is below this
   # are marked low_overlap and ignored by the selector's clustering.
   corr_min_overlap_frac: 0.10
+  # With io.scan_cache disabled, correlation pass-2 re-parses the full CSV
+  # once per block pair (quadratic in chunk count). Above this feature count
+  # that's a hard error unless allow_slow_correlation: true — a wide run
+  # should never silently take hours because a cache flag was off.
+  slow_correlation_max_features: 500
+  allow_slow_correlation: false
   # Stage-1 v1_auto truncation cap; null -> fall back to
   # training.final_feature_count (legacy behavior). When the Stage-1.5 model
   # screen is enabled, set this LARGER than final_feature_count so the screen
@@ -224,6 +230,11 @@ training:
     n_seeds: 3                  # used by *_stability variants
     n_permutation_repeats: 3    # used by permutation / permutation_stability
     permutation_seed: 0
+    # permutation only: score on this seeded fraction of valid rows instead
+    # of all of them (1.0 = exact legacy behavior). The permutation cost is
+    # ~n_features × n_repeats full-matrix predicts — on wide candidate pools
+    # with a large valid set, 0.3 is usually indistinguishable in ranking.
+    permutation_row_subsample: 1.0
     # null = score on the full valid set (best fidelity). SHAP memory scales
     # ~n_samples × n_features × 8 bytes — set an explicit cap (e.g. 50000)
     # when valid is huge or candidates exceed a few thousand to avoid OOM.
